@@ -29,6 +29,8 @@ pub fn build(b: *std.Build) void {
         apk.setKeyStore(key_store_file);
         apk.setAndroidManifest(b.path("android/AndroidManifest.xml"));
         apk.addResourceDirectory(b.path("android/res"));
+        apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/TextInput.java") });
+        apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/MainActivity.java") });
 
         break :blk apk;
     };
@@ -75,6 +77,7 @@ pub fn build(b: *std.Build) void {
             const native_app_glue_dir: std.Build.LazyPath = .{ .cwd_relative = b.fmt("{s}/sources/android/native_app_glue", .{apk.ndk.path}) };
             app.addCSourceFile(.{ .file = native_app_glue_dir.path(b, "android_native_app_glue.c") });
             app.addIncludePath(native_app_glue_dir);
+            app.addCSourceFile(.{ .file = b.path("src/android_keyboard.c") });
 
             apk.addArtifact(b.addLibrary(.{
                 .linkage = .dynamic,
@@ -97,7 +100,7 @@ pub fn build(b: *std.Build) void {
         const android_sdk = apk.sdk;
         const run_step = b.step("run", "Install and run the application on an Android device");
         const adb_install = android_sdk.addAdbInstall(installed_apk.source);
-        const adb_start = android_sdk.addAdbStart("com.zig.loki/android.app.NativeActivity");
+        const adb_start = android_sdk.addAdbStart("com.zig.loki/com.zig.loki.MainActivity");
         adb_start.step.dependOn(&adb_install.step);
         run_step.dependOn(&adb_start.step);
     }

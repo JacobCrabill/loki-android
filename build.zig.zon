@@ -5,16 +5,18 @@
     .fingerprint = 0x13035e5cf42e313f,
     .dependencies = .{
         .android = .{
-            .url = "https://github.com/silbinarywolf/zig-android-sdk/archive/8d1deb307d57c7d3f22c6d8cf3573bb1dedc7c39.tar.gz",
-            .hash = "android-0.3.0-7iz7QrgGAgBZrHuI-EackndG6h9Bn7YvqH2SoH3rUr51",
+            // .path = "../zig-tools/android-sdk",
+            .url = "https://github.com/jacobcrabill/zig-android-sdk/archive/556c70c9d63c062579650402b73b22b83bc748e2.tar.gz",
+            .hash = "android-0.3.0-7iz7QnEHAgB0adzAmAdGKFo9KTyLVUUz6VCYlDfZ5tfF",
         },
         .raylib_zig = .{
             .url = "git+https://github.com/raylib-zig/raylib-zig#cd71c85d571027ac8033357f83b124ee051825b3",
             .hash = "raylib_zig-5.6.0-dev-KE8REENOBQC-m5nK7M2b5aKSIubJPbPLUYcRhT7aT3RN",
         },
         .loki = .{
-            .url = "https://github.com/JacobCrabill/loki/archive/35d9f512abc3c13fa8578abe597aeb8faa760205.tar.gz",
-            .hash = "loki-0.0.0-pFApzoFrAwDDshWy9zkh4aI8p2iFmNK7OupNY8S8bYT5",
+            // .path = "../loki",
+            .url = "https://github.com/JacobCrabill/loki/archive/7786c61400dc1bce4a90f74279947eaf52d43438.tar.gz",
+            .hash = "loki-0.0.0-pFApzgmbAwD5PIFYujuriFUEOdNFKmFNUUKl_kKOoRiO",
         },
     },
     .paths = .{
