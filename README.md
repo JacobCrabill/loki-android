@@ -1,4 +1,4 @@
-# Raylib Example
+# Loki Password Manager: Android App
 
 **Note**: Due to [an upstream bug](https://github.com/ziglang/zig/issues/20476), you will probably
 receive a warning (or multiple warnings if building for multiple targets) like this:
@@ -22,7 +22,7 @@ zig build run -Dandroid # Android
 
 ```sh
 zig build -Dtarget=x86_64-linux-android
-adb install ./zig-out/bin/raylib.apk
+adb install ./zig-out/bin/loki-android.apk
 adb shell am start -S -W -n com.zig.loki/android.app.NativeActivity
 ```
 
@@ -30,7 +30,7 @@ adb shell am start -S -W -n com.zig.loki/android.app.NativeActivity
 
 ```sh
 zig build -Dandroid
-adb install ./zig-out/bin/raylib.apk
+adb install ./zig-out/bin/loki-android.apk
 ```
 
 ### Uninstall your application
@@ -38,7 +38,7 @@ adb install ./zig-out/bin/raylib.apk
 If installing your application fails with something like:
 
 ```
-adb: failed to install ./zig-out/bin/raylib.apk: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package com.zig.loki signatures do not match newer version; ignoring!]
+adb: failed to install ./zig-out/bin/loki-android.apk: Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package com.zig.loki signatures do not match newer version; ignoring!]
 ```
 
 ```sh
@@ -69,15 +69,18 @@ adb logcat --pid=`adb shell pidof -s com.zig.loki`
 
 - Install the JAVA SDK from <https://www.oracle.com/java/technologies/downloads/>
   - I used the `.tar.gz` and unpacked it to `~/.local/apps/jdk-24.0.2`
-- Install the android cmdline-tools to `~/.local/apps/android-sdk/cmdline-tools/latest/`
+- Install the android [cmdline-tools](https://developer.android.com/studio#command-line-tools-only)
+  to `~/.local/apps/android-sdk/cmdline-tools/latest/`
 
 ```bash
-export JDK_HOME=${HOME}/.local/apps/jdk-24.0.2
-# IMPORTANT: This Java version must be found first within your PATH!
-export PATH=${JDK_HOME}/bin:${PATH}
+export JDK_HOME=${HOME}/.local/apps/jdk-25.0.2
 export ANDROID_HOME=${HOME}/.local/apps/android-sdk/
+# IMPORTANT: This Java version must be found first within your PATH!
+export PATH=${JDK_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${PATH}
 sdkmanager --install "build-tools;35.0.1"
 sdkmanager --install "ndk;29.0.13113456"
-sdkmanager --install "platforms;android-29"
+sdkmanager --install "platforms;android-35"
 sdkmanager --install "platform-tools"
+export PATH=${ANDROID_HOME}/platform-tools:${PATH}
+sudo usermod -aG plugdev $USER
 ```
