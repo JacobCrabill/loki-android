@@ -148,6 +148,11 @@ const TextField = struct {
     }
 };
 
+// Font size derived from element height: ~55% of height.
+fn fsByHeight(h: i32) i32 {
+    return @max(12, @divTrunc(h * 11, 20));
+}
+
 fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: bool) void {
     rl.drawRectangle(x, y, w, h, if (focused) .white else .light_gray);
     rl.drawRectangleLines(x, y, w, h, if (focused) .sky_blue else .gray);
@@ -159,12 +164,13 @@ fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: b
         @memcpy(disp[0..f.len], f.buf[0..f.len]);
     }
 
-    const fs = 20;
-    rl.drawText(&disp, x + 6, y + @divTrunc(h - fs, 2), fs, .dark_gray);
+    const fs = fsByHeight(h);
+    const pad = @max(6, @divTrunc(h, 8));
+    rl.drawText(&disp, x + pad, y + @divTrunc(h - fs, 2), fs, .dark_gray);
 
     if (focused) {
         const tw = rl.measureText(&disp, fs);
-        rl.drawRectangle(x + 6 + tw, y + 5, 2, h - 10, .sky_blue);
+        rl.drawRectangle(x + pad + tw, y + @divTrunc(h, 6), 2, @divTrunc(h * 2, 3), .sky_blue);
     }
 }
 
@@ -177,7 +183,6 @@ fn inRect(mx: f32, my: f32, x: i32, y: i32, w: i32, h: i32) bool {
 
 // ---- Draw helpers ----
 
-// Draw text from a runtime slice (not null-terminated).
 fn drawSlice(text: []const u8, x: i32, y: i32, fs: i32, color: rl.Color) void {
     var buf: [512:0]u8 = undefined;
     const n = @min(text.len, 511);
@@ -188,10 +193,45 @@ fn drawSlice(text: []const u8, x: i32, y: i32, fs: i32, color: rl.Color) void {
 
 fn drawButton(label: [:0]const u8, x: i32, y: i32, w: i32, h: i32, color: rl.Color) void {
     rl.drawRectangle(x, y, w, h, color);
-    const fs = 18;
+    const fs = fsByHeight(h);
     const tw = rl.measureText(label, fs);
     rl.drawText(label, x + @divTrunc(w - tw, 2), y + @divTrunc(h - fs, 2), fs, .white);
 }
+
+// ---- Responsive layout ----
+//
+// All values scale with screen width so the UI looks right on any phone.
+// Design reference: 480 × 854 (portrait, 1x density).
+//
+const Layout = struct {
+    hdr_h: i32, // top header / nav-bar height
+    row_h: i32, // list row height (browser)
+    pad: i32, // general padding
+    fh: i32, // form field height
+    btn_h: i32, // standard button height
+    fs_hdr: i32, // header font size
+    fs_body: i32, // body / value font size
+    fs_label: i32, // field label font size
+    fs_small: i32, // hint / secondary font size
+    detail_row_h: i32, // detail view row height
+    label_w: i32, // label column width in detail view
+
+    fn compute(sw: i32) Layout {
+        return .{
+            .hdr_h        = @divTrunc(sw, 8),           //  60 @ 480
+            .row_h        = @divTrunc(sw, 6),           //  80 @ 480
+            .pad          = @max(12, @divTrunc(sw, 30)), //  16 @ 480
+            .fh           = @divTrunc(sw, 9),           //  53 @ 480
+            .btn_h        = @divTrunc(sw, 8),           //  60 @ 480
+            .fs_hdr       = @divTrunc(sw, 17),          //  28 @ 480
+            .fs_body      = @divTrunc(sw, 24),          //  20 @ 480
+            .fs_label     = @divTrunc(sw, 30),          //  16 @ 480
+            .fs_small     = @divTrunc(sw, 38),          //  12 @ 480
+            .detail_row_h = @divTrunc(sw * 3, 16),      //  90 @ 480
+            .label_w      = @divTrunc(sw, 3),           // 160 @ 480
+        };
+    }
+};
 
 // ---- Browser row ----
 
@@ -215,14 +255,7 @@ fn rowLessThan(_: void, a: BrowserRow, b: BrowserRow) bool {
 
 // ---- App phases ----
 
-const Phase = enum {
-    unlock,
-    browser,
-    detail,
-    sync_setup,
-    sync_running,
-    sync_result,
-};
+const Phase = enum { unlock, browser, detail, sync_setup, sync_running, sync_result };
 
 // ---- DB open + row population ----
 
@@ -231,7 +264,7 @@ const OpenError = error{ StorageError, WrongPassword, OpenFailed, OutOfMemory };
 fn openDbAndPopulate(
     allocator: std.mem.Allocator,
     db_out: *?loki.Database,
-    rows: *std.ArrayList(BrowserRow),
+    rows: *std.ArrayListUnmanaged(BrowserRow),
     pw_slice: []const u8,
 ) OpenError!void {
     var base = openBaseDir() catch return error.StorageError;
@@ -267,7 +300,8 @@ fn openDbAndPopulate(
 // ---- App entry point ----
 
 pub fn main() !void {
-    rl.initWindow(800, 450, "Loki");
+    // Portrait window for desktop preview; on Android the OS sets the size.
+    rl.initWindow(480, 854, "Loki");
     defer rl.closeWindow();
     rl.setTargetFPS(60);
 
@@ -277,22 +311,22 @@ pub fn main() !void {
 
     var phase: Phase = if (dbDirExists()) .unlock else .sync_setup;
 
-    // ---- Unlock state ----
+    // ---- Unlock ----
     var unlock_pw = TextField{ .masked = true };
     var unlock_err: ?[:0]const u8 = null;
     var unlock_dialog_shown = false;
 
-    // ---- DB + browser state ----
+    // ---- DB + browser ----
     var db: ?loki.Database = null;
     var rows: std.ArrayListUnmanaged(BrowserRow) = .{};
     var browser_scroll: f32 = 0;
 
-    // ---- Detail state ----
+    // ---- Detail ----
     var detail_entry: ?loki.Entry = null;
     var detail_show_pw = false;
     var detail_scroll: f32 = 0;
 
-    // ---- Sync state ----
+    // ---- Sync ----
     var ip_field = TextField{};
     ip_field.setDefault("192.168.1.100");
     var sync_pw_field = TextField{ .masked = true };
@@ -302,8 +336,11 @@ pub fn main() !void {
     var first_use = (phase == .sync_setup);
     var delete_db_err: ?[:0]const u8 = null;
 
-    // Tap detection: accumulate drag distance per press, tap if < threshold.
+    // Tap detection: a release with < 10px of accumulated Y drag is a tap.
     var drag_accum: f32 = 0;
+
+    // Index of the "Password" field in the detail view field array.
+    const DETAIL_PW_IDX: i32 = 5;
 
     defer {
         if (detail_entry) |e| e.deinit(allocator);
@@ -312,31 +349,18 @@ pub fn main() !void {
         if (db) |*d| d.deinit();
     }
 
-    // Layout constants (tuned for 800×450 desktop; scale on phone is a future task).
-    const HDR_H: i32 = 56; // top header bar height
-    const ROW_H: i32 = 72; // browser list row height
-    const PAD: i32 = 16;
-    const FH: i32 = 36; // form field height
-    const FS_HDR: i32 = 24;
-    const FS_BODY: i32 = 20;
-    const FS_LABEL: i32 = 16;
-    const FS_SMALL: i32 = 14;
-
-    // Detail view: fields below the header, each DETAIL_ROW_H px tall.
-    const DETAIL_ROW_H: i32 = 80;
-    // Field indices in detail view (password is index 4).
-    const DETAIL_PW_IDX: i32 = 4;
-
     while (!rl.windowShouldClose()) {
         const sw = rl.getScreenWidth();
         const sh = rl.getScreenHeight();
+        const L = Layout.compute(sw);
+
         const mouse = rl.getMousePosition();
         const mx = mouse.x;
         const my = mouse.y;
 
         if (rl.isMouseButtonPressed(.left)) drag_accum = 0;
         if (rl.isMouseButtonDown(.left)) drag_accum += @abs(rl.getMouseDelta().y);
-        const is_tap = rl.isMouseButtonReleased(.left) and drag_accum < 8;
+        const is_tap = rl.isMouseButtonReleased(.left) and drag_accum < 10;
 
         // ==================================================================
         // INPUT
@@ -362,7 +386,6 @@ pub fn main() !void {
                                 error.WrongPassword => "Wrong password.",
                                 else => "Failed to open database.",
                             };
-                            // Will re-show dialog next iteration.
                         };
                         if (db != null) {
                             browser_scroll = 0;
@@ -371,26 +394,22 @@ pub fn main() !void {
                     } else if (poll < 0) {
                         unlock_dialog_shown = false;
                         unlock_err = "Cancelled. Tap to retry.";
-                    } else if (is_tap and unlock_err != null and !unlock_dialog_shown) {
-                        // Tap after cancel or error: re-show dialog.
+                    } else if (is_tap and !unlock_dialog_shown) {
                         unlock_pw.showDialog("Enter password", true);
                         unlock_dialog_shown = true;
                         unlock_err = null;
                     }
                 } else {
-                    // Desktop: keyboard input.
                     if (rl.isKeyPressed(.backspace)) unlock_pw.pop();
                     var ch = rl.getCharPressed();
                     while (ch != 0) : (ch = rl.getCharPressed()) {
                         if (ch >= 32 and ch < 127) unlock_pw.append(@intCast(ch));
                     }
 
-                    const btn_w: i32 = 130;
-                    const btn_h: i32 = 44;
-                    const btn_x: i32 = @divTrunc(sw - btn_w, 2);
-                    const btn_y: i32 = @divTrunc(sh, 2) + 20;
+                    const btn_w = sw - 2 * L.pad;
+                    const btn_y = @divTrunc(sh * 3, 5);
                     const open_pressed = rl.isKeyPressed(.enter) or
-                        (is_tap and inRect(mx, my, btn_x, btn_y, btn_w, btn_h));
+                        (is_tap and inRect(mx, my, L.pad, btn_y, btn_w, L.btn_h));
                     if (open_pressed) {
                         openDbAndPopulate(allocator, &db, &rows, unlock_pw.slice()) catch |err| {
                             unlock_err = switch (err) {
@@ -411,15 +430,16 @@ pub fn main() !void {
                 if (rl.isMouseButtonDown(.left)) {
                     browser_scroll -= rl.getMouseDelta().y;
                 }
-                const content_h: f32 = @floatFromInt(@as(i32, @intCast(rows.items.len)) * ROW_H);
-                const visible_h: f32 = @floatFromInt(sh - HDR_H);
+                const content_h: f32 = @floatFromInt(@as(i32, @intCast(rows.items.len)) * L.row_h);
+                const visible_h: f32 = @floatFromInt(sh - L.hdr_h);
                 browser_scroll = std.math.clamp(browser_scroll, 0, @max(0, content_h - visible_h));
 
                 if (is_tap) {
                     // Sync button (top-right of header).
-                    const sbx: i32 = sw - 80 - PAD;
-                    const sby: i32 = @divTrunc(HDR_H - 36, 2);
-                    if (inRect(mx, my, sbx, sby, 80, 36)) {
+                    const sync_btn_w = @divTrunc(sw, 5);
+                    const sync_btn_x = sw - sync_btn_w - L.pad;
+                    const sync_btn_y = @divTrunc(L.hdr_h - @divTrunc(L.btn_h, 2), 2);
+                    if (inRect(mx, my, sync_btn_x, sync_btn_y, sync_btn_w, @divTrunc(L.btn_h, 2))) {
                         if (db) |*d| d.deinit();
                         db = null;
                         for (rows.items) |r| r.deinit(allocator);
@@ -429,10 +449,10 @@ pub fn main() !void {
                         phase = .sync_setup;
                     }
                     // Row tap → detail.
-                    else if (my >= @as(f32, @floatFromInt(HDR_H))) {
-                        const rel_y = @as(i32, @intFromFloat(my)) - HDR_H +
+                    else if (my >= @as(f32, @floatFromInt(L.hdr_h))) {
+                        const rel_y = @as(i32, @intFromFloat(my)) - L.hdr_h +
                             @as(i32, @intFromFloat(browser_scroll));
-                        const idx_i = @divTrunc(rel_y, ROW_H);
+                        const idx_i = @divTrunc(rel_y, L.row_h);
                         if (idx_i >= 0 and idx_i < @as(i32, @intCast(rows.items.len))) {
                             const idx: usize = @intCast(idx_i);
                             if (db) |*d| {
@@ -459,40 +479,35 @@ pub fn main() !void {
                         phase = .browser;
                 }
                 if (is_tap) {
-                    // Back button: left quarter of header.
-                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 4), HDR_H))
+                    // Back: left half of header.
+                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 2), L.hdr_h))
                         phase = .browser;
-                    // Show/hide password toggle button.
-                    const pw_row_y = HDR_H + PAD + DETAIL_PW_IDX * DETAIL_ROW_H -
+                    // Show/hide password toggle (right side of the password row).
+                    const pw_row_y = L.hdr_h + L.pad + DETAIL_PW_IDX * L.detail_row_h -
                         @as(i32, @intFromFloat(detail_scroll));
-                    if (inRect(mx, my, sw - 100 - PAD, pw_row_y, 100, 32))
+                    const toggle_w = @divTrunc(sw, 5);
+                    if (inRect(mx, my, sw - toggle_w - L.pad, pw_row_y, toggle_w, L.detail_row_h))
                         detail_show_pw = !detail_show_pw;
                 }
             },
 
             // ---- Sync setup --------------------------------------------
             .sync_setup => {
-                const fx: i32 = 180;
-                const fw: i32 = 400;
-                const ip_y: i32 = 110;
-                const pw_y: i32 = 170;
-                const btn_x: i32 = fx;
-                const btn_y: i32 = 240;
-                const btn_w: i32 = 130;
-                const btn_h: i32 = 42;
-                const del_btn_x: i32 = btn_x + btn_w + 20;
-                const del_btn_y: i32 = btn_y;
-                const del_btn_w: i32 = 130;
-                const del_btn_h: i32 = btn_h;
+                // Portrait form layout (computed from L).
+                const fw = sw - 2 * L.pad;
+                const ip_field_y = L.hdr_h + L.pad * 2 + L.fs_label + 6;
+                const pw_field_y = ip_field_y + L.fh + L.pad + L.fs_label + 6;
+                const submit_btn_y = pw_field_y + L.fh + L.pad * 2;
+                const del_btn_y = submit_btn_y + L.btn_h + L.pad;
 
                 if (rl.isMouseButtonPressed(.left)) {
-                    if (inRect(mx, my, fx, ip_y, fw, FH)) {
+                    if (inRect(mx, my, L.pad, ip_field_y, fw, L.fh)) {
                         sync_focus_ip = true;
                         if (comptime is_android) {
                             ip_field.showDialog("Server IP", false);
                             sync_pending_field = true;
                         }
-                    } else if (inRect(mx, my, fx, pw_y, fw, FH)) {
+                    } else if (inRect(mx, my, L.pad, pw_field_y, fw, L.fh)) {
                         sync_focus_ip = false;
                         if (comptime is_android) {
                             sync_pw_field.showDialog("Password", true);
@@ -527,7 +542,7 @@ pub fn main() !void {
 
                 // Delete DB button.
                 if (!first_use and rl.isMouseButtonPressed(.left) and
-                    inRect(mx, my, del_btn_x, del_btn_y, del_btn_w, del_btn_h))
+                    inRect(mx, my, L.pad, del_btn_y, fw, L.btn_h))
                 {
                     if (deleteDb()) {
                         first_use = true;
@@ -539,9 +554,9 @@ pub fn main() !void {
                 }
 
                 // Sync / Fetch button.
-                const clicked_btn = rl.isMouseButtonPressed(.left) and
-                    inRect(mx, my, btn_x, btn_y, btn_w, btn_h);
-                if (clicked_btn or rl.isKeyPressed(.enter)) {
+                const clicked_submit = rl.isMouseButtonPressed(.left) and
+                    inRect(mx, my, L.pad, submit_btn_y, fw, L.btn_h);
+                if (clicked_submit or rl.isKeyPressed(.enter)) {
                     if (ip_field.len == 0 or sync_pw_field.len == 0) {
                         sync_err = "Please enter IP and password.";
                     } else {
@@ -568,12 +583,8 @@ pub fn main() !void {
             },
 
             .sync_result => {
-                // "Open" button: go to unlock (or browser if no password needed).
-                const btn_w: i32 = 120;
-                const btn_h: i32 = 44;
-                const btn_x: i32 = 10;
-                const btn_y: i32 = sh - btn_h - PAD;
-                if (is_tap and inRect(mx, my, btn_x, btn_y, btn_w, btn_h) and
+                const btn_y = sh - L.btn_h - L.pad;
+                if (is_tap and inRect(mx, my, L.pad, btn_y, sw - 2 * L.pad, L.btn_h) and
                     g_status.load(.acquire) == .done)
                 {
                     unlock_pw = TextField{ .masked = true };
@@ -595,70 +606,83 @@ pub fn main() !void {
 
             // ---- Unlock ------------------------------------------------
             .unlock => {
-                rl.drawText("Loki", 10, 10, 28, .white);
-                rl.drawText("Enter password to open your database.", 10, 50, FS_BODY, .gray);
+                // App name centered near top third.
+                const title_y = @divTrunc(sh, 6);
+                const title_tw = rl.measureText("Loki", L.fs_hdr * 2);
+                rl.drawText("Loki", @divTrunc(sw - title_tw, 2), title_y, L.fs_hdr * 2, .white);
 
-                const fw: i32 = 400;
-                const fx: i32 = @divTrunc(sw - fw, 2);
-                const fy: i32 = @divTrunc(sh, 2) - FH;
-                drawTextField(&unlock_pw, fx, fy, fw, FH, true);
+                const sub = "Enter password to open your database.";
+                const sub_tw = rl.measureText(sub, L.fs_label);
+                rl.drawText(sub, @divTrunc(sw - sub_tw, 2),
+                    title_y + L.fs_hdr * 2 + L.pad, L.fs_label, .gray);
+
+                // Password field in the middle.
+                const field_y = @divTrunc(sh * 2, 5);
+                const fw = sw - 2 * L.pad;
+                drawTextField(&unlock_pw, L.pad, field_y, fw, L.fh, true);
 
                 if (unlock_err) |msg| {
-                    rl.drawText(msg, fx, fy + FH + 8, FS_LABEL, .orange);
+                    const etw = rl.measureText(msg, L.fs_label);
+                    rl.drawText(msg, @divTrunc(sw - etw, 2),
+                        field_y + L.fh + L.pad, L.fs_label, .orange);
                 }
 
                 if (comptime !is_android) {
-                    const btn_w: i32 = 130;
-                    const btn_h: i32 = 44;
-                    const btn_x: i32 = @divTrunc(sw - btn_w, 2);
-                    const btn_y: i32 = @divTrunc(sh, 2) + 20;
-                    drawButton("Open", btn_x, btn_y, btn_w, btn_h, .{ .r = 30, .g = 140, .b = 200, .a = 255 });
-                    rl.drawText("Enter: open", fx, sh - 30, FS_SMALL, .dark_gray);
+                    const btn_y = @divTrunc(sh * 3, 5);
+                    drawButton("Open", L.pad, btn_y, fw, L.btn_h,
+                        .{ .r = 30, .g = 140, .b = 200, .a = 255 });
+                    rl.drawText("Enter: open", L.pad, sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
                 }
             },
 
             // ---- Browser -----------------------------------------------
             .browser => {
                 // Header bar.
-                rl.drawRectangle(0, 0, sw, HDR_H, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-                rl.drawText("Loki", PAD, @divTrunc(HDR_H - FS_HDR, 2), FS_HDR, .white);
+                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                rl.drawText("Loki", L.pad, @divTrunc(L.hdr_h - L.fs_hdr, 2), L.fs_hdr, .white);
 
-                // Sync button (top-right).
-                const sbx: i32 = sw - 80 - PAD;
-                const sby: i32 = @divTrunc(HDR_H - 36, 2);
-                drawButton("Sync", sbx, sby, 80, 36, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
+                // Sync button (top-right, half button height so it sits neatly in the header).
+                const sync_btn_w = @divTrunc(sw, 5);
+                const sync_btn_h = @divTrunc(L.btn_h, 2);
+                const sync_btn_x = sw - sync_btn_w - L.pad;
+                const sync_btn_y = @divTrunc(L.hdr_h - sync_btn_h, 2);
+                drawButton("Sync", sync_btn_x, sync_btn_y, sync_btn_w, sync_btn_h,
+                    .{ .r = 30, .g = 130, .b = 180, .a = 255 });
 
                 if (rows.items.len == 0) {
-                    rl.drawText("No entries.", PAD, HDR_H + PAD, FS_BODY, .gray);
+                    rl.drawText("No entries.", L.pad, L.hdr_h + L.pad, L.fs_body, .gray);
                 }
 
-                // Clipped entry list.
-                const list_top: i32 = HDR_H;
+                const list_top = L.hdr_h;
                 rl.beginScissorMode(0, list_top, sw, sh - list_top);
                 for (rows.items, 0..) |row, i| {
-                    const row_y: i32 = list_top + @as(i32, @intCast(i)) * ROW_H -
+                    const row_y = list_top + @as(i32, @intCast(i)) * L.row_h -
                         @as(i32, @intFromFloat(browser_scroll));
-                    if (row_y + ROW_H < list_top or row_y > sh) continue;
+                    if (row_y + L.row_h < list_top or row_y > sh) continue;
 
-                    // Alternating background.
                     const bg: rl.Color = if (i % 2 == 0)
                         .{ .r = 18, .g = 18, .b = 28, .a = 255 }
                     else
                         .{ .r = 24, .g = 24, .b = 36, .a = 255 };
-                    rl.drawRectangle(0, row_y, sw, ROW_H, bg);
+                    rl.drawRectangle(0, row_y, sw, L.row_h, bg);
 
-                    // Title.
-                    drawSlice(row.title, PAD, row_y + 10, FS_BODY, .white);
-                    // Path (dimmer, smaller).
+                    // Title and path stacked vertically, vertically centered in the row.
+                    const text_block_h = if (row.path.len > 0)
+                        L.fs_body + @divTrunc(L.pad, 2) + L.fs_small
+                    else
+                        L.fs_body;
+                    const text_y = row_y + @divTrunc(L.row_h - text_block_h, 2);
+
+                    drawSlice(row.title, L.pad, text_y, L.fs_body, .white);
                     if (row.path.len > 0) {
-                        drawSlice(row.path, PAD, row_y + 10 + FS_BODY + 6, FS_SMALL, .gray);
+                        drawSlice(row.path, L.pad, text_y + L.fs_body + @divTrunc(L.pad, 2), L.fs_small, .gray);
                     }
 
-                    // Chevron ›.
-                    rl.drawText(">", sw - PAD - 16, row_y + @divTrunc(ROW_H - FS_BODY, 2), FS_BODY, .dark_gray);
+                    rl.drawText(">", sw - L.pad - L.fs_body,
+                        row_y + @divTrunc(L.row_h - L.fs_body, 2), L.fs_body, .dark_gray);
 
-                    // Divider.
-                    rl.drawRectangle(0, row_y + ROW_H - 1, sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+                    rl.drawRectangle(0, row_y + L.row_h - 1, sw, 1,
+                        .{ .r = 40, .g = 40, .b = 55, .a = 255 });
                 }
                 rl.endScissorMode();
             },
@@ -666,22 +690,20 @@ pub fn main() !void {
             // ---- Detail ------------------------------------------------
             .detail => {
                 const entry = detail_entry orelse {
-                    rl.drawText("No entry loaded.", PAD, HDR_H + PAD, FS_BODY, .gray);
+                    rl.drawText("No entry loaded.", L.pad, L.hdr_h + L.pad, L.fs_body, .gray);
                     return;
                 };
 
                 // Header.
-                rl.drawRectangle(0, 0, sw, HDR_H, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-                rl.drawText("< Back", PAD, @divTrunc(HDR_H - FS_BODY, 2), FS_BODY, .sky_blue);
-                drawSlice(entry.title, @divTrunc(sw, 4), @divTrunc(HDR_H - FS_HDR, 2), FS_HDR, .white);
+                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                rl.drawText("< Back", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
 
                 // Scrollable field list.
-                rl.beginScissorMode(0, HDR_H, sw, sh - HDR_H);
+                rl.beginScissorMode(0, L.hdr_h, sw, sh - L.hdr_h);
 
                 const scroll_i: i32 = @intFromFloat(detail_scroll);
-                const field_x0: i32 = PAD;
-                const val_x: i32 = 160;
-                _ = sw - val_x - PAD - 110; // val_w: leave room for toggle button
+                const val_x = L.label_w + L.pad;
+                const toggle_w = @divTrunc(sw, 5);
 
                 const Field = struct { label: []const u8, value: []const u8 };
                 const fields = [_]Field{
@@ -695,50 +717,54 @@ pub fn main() !void {
                 };
 
                 for (fields, 0..) |f, fi| {
-                    const fy: i32 = HDR_H + PAD + @as(i32, @intCast(fi)) * DETAIL_ROW_H - scroll_i;
-                    if (fy + DETAIL_ROW_H < HDR_H or fy > sh) continue;
+                    const fy = L.hdr_h + L.pad + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
+                    if (fy + L.detail_row_h < L.hdr_h or fy > sh) continue;
 
-                    // Row background.
                     const bg: rl.Color = if (fi % 2 == 0)
                         .{ .r = 18, .g = 18, .b = 28, .a = 255 }
                     else
                         .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-                    rl.drawRectangle(0, fy, sw, DETAIL_ROW_H, bg);
+                    rl.drawRectangle(0, fy, sw, L.detail_row_h, bg);
 
-                    // Label.
-                    drawSlice(f.label, field_x0, fy + @divTrunc(DETAIL_ROW_H - FS_LABEL, 2), FS_LABEL, .gray);
+                    // Label (left column, dimmed).
+                    drawSlice(f.label, L.pad,
+                        fy + @divTrunc(L.detail_row_h - L.fs_label, 2), L.fs_label, .gray);
 
-                    // Value (password masked unless show_pw is set).
-                    if (fi == DETAIL_PW_IDX and !detail_show_pw) {
+                    // Value (right column).
+                    const val_y = fy + @divTrunc(L.detail_row_h - L.fs_body, 2);
+                    const is_pw = fi == DETAIL_PW_IDX;
+
+                    if (is_pw and !detail_show_pw) {
                         var stars: [64:0]u8 = undefined;
                         const n = @min(f.value.len, 63);
                         @memset(stars[0..n], '*');
                         stars[n] = 0;
-                        rl.drawText(&stars, val_x, fy + @divTrunc(DETAIL_ROW_H - FS_BODY, 2), FS_BODY, .white);
-
-                        // Show/Hide button.
-                        const toggle_label: [:0]const u8 = "Show";
-                        drawButton(toggle_label, sw - 100 - PAD, fy + @divTrunc(DETAIL_ROW_H - 32, 2), 100, 32,
-                            .{ .r = 60, .g = 60, .b = 80, .a = 255 });
-                    } else if (fi == DETAIL_PW_IDX and detail_show_pw) {
-                        drawSlice(f.value, val_x, fy + @divTrunc(DETAIL_ROW_H - FS_BODY, 2), FS_BODY,
+                        rl.drawText(&stars, val_x, val_y, L.fs_body, .white);
+                    } else if (is_pw and detail_show_pw) {
+                        drawSlice(f.value, val_x, val_y, L.fs_body,
                             .{ .r = 255, .g = 200, .b = 100, .a = 255 });
-
-                        const toggle_label: [:0]const u8 = "Hide";
-                        drawButton(toggle_label, sw - 100 - PAD, fy + @divTrunc(DETAIL_ROW_H - 32, 2), 100, 32,
-                            .{ .r = 60, .g = 60, .b = 80, .a = 255 });
                     } else {
-                        // Clip long values to val_w to avoid overflow.
-                        drawSlice(f.value, val_x, fy + @divTrunc(DETAIL_ROW_H - FS_BODY, 2), FS_BODY, .white);
+                        drawSlice(f.value, val_x, val_y, L.fs_body, .white);
                     }
 
-                    // Divider.
-                    rl.drawRectangle(0, fy + DETAIL_ROW_H - 1, sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+                    // Show/Hide toggle button (password row only).
+                    if (is_pw) {
+                        const toggle_h = @divTrunc(L.detail_row_h * 2, 3);
+                        const toggle_label: [:0]const u8 = if (detail_show_pw) "Hide" else "Show";
+                        drawButton(toggle_label,
+                            sw - toggle_w - L.pad,
+                            fy + @divTrunc(L.detail_row_h - toggle_h, 2),
+                            toggle_w, toggle_h,
+                            .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                    }
+
+                    rl.drawRectangle(0, fy + L.detail_row_h - 1, sw, 1,
+                        .{ .r = 40, .g = 40, .b = 55, .a = 255 });
                 }
 
                 if (comptime !is_android) {
-                    const hint_y: i32 = sh - 22;
-                    rl.drawText("h: show/hide password   Esc/Backspace: back", PAD, hint_y, FS_SMALL, .dark_gray);
+                    rl.drawText("h: pw  Esc: back", L.pad,
+                        sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
                 }
 
                 rl.endScissorMode();
@@ -746,87 +772,78 @@ pub fn main() !void {
 
             // ---- Sync setup --------------------------------------------
             .sync_setup => {
-                const lx: i32 = 30;
-                const fx: i32 = 180;
-                const fw: i32 = 400;
-                const ip_y: i32 = 110;
-                const pw_y: i32 = 170;
-                const btn_x: i32 = fx;
-                const btn_y: i32 = 240;
-                const btn_w: i32 = 130;
-                const btn_h: i32 = 42;
-                const del_btn_x: i32 = btn_x + btn_w + 20;
-                const del_btn_y: i32 = btn_y;
-                const del_btn_w: i32 = 130;
-                const del_btn_h: i32 = btn_h;
+                // Portrait vertical form layout.
+                const fw = sw - 2 * L.pad;
+                const title_y = L.pad * 2;
+                const sub_y = title_y + L.fs_hdr + L.pad;
+                const ip_label_y = sub_y + L.fs_label + L.pad * 2;
+                const ip_field_y = ip_label_y + L.fs_label + 6;
+                const pw_label_y = ip_field_y + L.fh + L.pad;
+                const pw_field_y = pw_label_y + L.fs_label + 6;
+                const submit_btn_y = pw_field_y + L.fh + L.pad * 2;
+                const del_btn_y = submit_btn_y + L.btn_h + L.pad;
 
-                rl.drawText("Loki Sync", 10, 10, 28, .white);
+                rl.drawText("Loki Sync", L.pad, title_y, L.fs_hdr, .white);
 
                 const subtitle: [:0]const u8 = if (first_use)
                     "First use: fetch the database from server"
                 else
                     "Sync database with server";
-                rl.drawText(subtitle, 10, 46, FS_LABEL, .gray);
+                rl.drawText(subtitle, L.pad, sub_y, L.fs_label, .gray);
 
-                rl.drawText("Server IP", lx, ip_y + @divTrunc(FH - FS_BODY, 2), FS_BODY, .light_gray);
-                drawTextField(&ip_field, fx, ip_y, fw, FH, sync_focus_ip);
+                rl.drawText("Server IP", L.pad, ip_label_y, L.fs_label, .light_gray);
+                drawTextField(&ip_field, L.pad, ip_field_y, fw, L.fh, sync_focus_ip);
 
-                rl.drawText("Password", lx, pw_y + @divTrunc(FH - FS_BODY, 2), FS_BODY, .light_gray);
-                drawTextField(&sync_pw_field, fx, pw_y, fw, FH, !sync_focus_ip);
+                rl.drawText("Password", L.pad, pw_label_y, L.fs_label, .light_gray);
+                drawTextField(&sync_pw_field, L.pad, pw_field_y, fw, L.fh, !sync_focus_ip);
 
-                const btn_label: [:0]const u8 = if (first_use) "Fetch" else "Sync";
-                rl.drawRectangle(btn_x, btn_y, btn_w, btn_h, .sky_blue);
-                const btn_tw = rl.measureText(btn_label, FS_BODY);
-                rl.drawText(btn_label, btn_x + @divTrunc(btn_w - btn_tw, 2),
-                    btn_y + @divTrunc(btn_h - FS_BODY, 2), FS_BODY, .white);
+                const submit_label: [:0]const u8 = if (first_use) "Fetch" else "Sync";
+                drawButton(submit_label, L.pad, submit_btn_y, fw, L.btn_h, .sky_blue);
 
                 if (!first_use) {
-                    rl.drawRectangle(del_btn_x, del_btn_y, del_btn_w, del_btn_h,
+                    drawButton("Delete DB", L.pad, del_btn_y, fw, L.btn_h,
                         .{ .r = 180, .g = 40, .b = 40, .a = 255 });
-                    const del_tw = rl.measureText("Delete DB", FS_BODY);
-                    rl.drawText("Delete DB", del_btn_x + @divTrunc(del_btn_w - del_tw, 2),
-                        del_btn_y + @divTrunc(del_btn_h - FS_BODY, 2), FS_BODY, .white);
                 }
 
-                if (sync_err) |msg| rl.drawText(msg, lx, 300, FS_LABEL, .orange);
-                if (delete_db_err) |msg| rl.drawText(msg, lx, 320, FS_LABEL, .red);
+                const err_y = del_btn_y + L.btn_h + L.pad;
+                if (sync_err) |msg| rl.drawText(msg, L.pad, err_y, L.fs_label, .orange);
+                if (delete_db_err) |msg| rl.drawText(msg, L.pad,
+                    err_y + L.fs_label + 4, L.fs_label, .red);
 
                 if (comptime !is_android) {
-                    rl.drawText("Tab: switch field   Enter: submit", lx, 400, FS_SMALL, .dark_gray);
-                } else {
-                    rl.drawText("Tap a field to edit it", lx, 400, FS_SMALL, .dark_gray);
+                    rl.drawText("Tab: switch field   Enter: submit",
+                        L.pad, sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
                 }
             },
 
             // ---- Sync running ------------------------------------------
             .sync_running => {
-                rl.drawText("Loki Sync", 10, 10, 28, .white);
+                rl.drawText("Loki Sync", L.pad, L.pad * 2, L.fs_hdr, .white);
                 const status_text: [:0]const u8 = switch (g_status.load(.acquire)) {
                     .connecting => "Connecting...",
                     .syncing => "Syncing...",
                     else => "Please wait...",
                 };
-                rl.drawText(status_text, 10, 200, 24, .yellow);
+                const stw = rl.measureText(status_text, L.fs_body);
+                rl.drawText(status_text, @divTrunc(sw - stw, 2),
+                    @divTrunc(sh, 2), L.fs_body, .yellow);
             },
 
             // ---- Sync result -------------------------------------------
             .sync_result => {
-                rl.drawText("Loki Sync", 10, 10, 28, .white);
+                rl.drawText("Loki Sync", L.pad, L.pad * 2, L.fs_hdr, .white);
+                const result_y = @divTrunc(sh, 4);
                 switch (g_status.load(.acquire)) {
                     .done => {
-                        rl.drawText("Sync complete!", 10, 200, 24, .green);
-                        rl.drawText(&g_msg_buf, 10, 234, 18, .green);
-                        // "Open" button.
-                        const btn_w: i32 = 120;
-                        const btn_h: i32 = 44;
-                        const btn_x: i32 = 10;
-                        const btn_y: i32 = sh - btn_h - PAD;
-                        drawButton("Open DB", btn_x, btn_y, btn_w, btn_h,
+                        rl.drawText("Sync complete!", L.pad, result_y, L.fs_body, .green);
+                        rl.drawText(&g_msg_buf, L.pad, result_y + L.fs_body + L.pad, L.fs_label, .green);
+                        drawButton("Open DB", L.pad, sh - L.btn_h - L.pad,
+                            sw - 2 * L.pad, L.btn_h,
                             .{ .r = 30, .g = 140, .b = 80, .a = 255 });
                     },
                     .failed => {
-                        rl.drawText("Sync failed:", 10, 200, 24, .red);
-                        rl.drawText(&g_msg_buf, 10, 234, 18, .red);
+                        rl.drawText("Sync failed:", L.pad, result_y, L.fs_body, .red);
+                        rl.drawText(&g_msg_buf, L.pad, result_y + L.fs_body + L.pad, L.fs_label, .red);
                     },
                     else => {},
                 }
