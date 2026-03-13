@@ -418,6 +418,9 @@ pub fn main() !void {
     var sync_pending_field: ?bool = null; // true=ip dialog, false=pw dialog (Android)
     var first_use = (phase == .sync_setup);
     var delete_db_err: ?[:0]const u8 = null;
+    var sync_from_browser = false; // P1.2: track if sync_setup was opened from browser
+    var delete_confirm_pending = false; // P1.3: two-tap confirmation for Delete DB
+    var delete_confirm_timer: f32 = 0; // P1.3: counts down from 3s
 
     // Tap detection: a release with < 10px of accumulated Y drag is a tap.
     var drag_accum: f32 = 0;
@@ -444,6 +447,15 @@ pub fn main() !void {
         if (rl.isMouseButtonPressed(.left)) drag_accum = 0;
         if (rl.isMouseButtonDown(.left)) drag_accum += @abs(rl.getMouseDelta().y);
         const is_tap = rl.isMouseButtonReleased(.left) and drag_accum < 10;
+
+        // P1.3: tick delete-confirm countdown
+        if (delete_confirm_pending) {
+            delete_confirm_timer -= rl.getFrameTime();
+            if (delete_confirm_timer <= 0) {
+                delete_confirm_pending = false;
+                delete_confirm_timer = 0;
+            }
+        }
 
         // ==================================================================
         // INPUT
@@ -523,12 +535,11 @@ pub fn main() !void {
                     const sync_btn_x = sw - sync_btn_w - L.pad;
                     const sync_btn_y = @divTrunc(L.hdr_h - @divTrunc(L.btn_h, 2), 2);
                     if (inRect(mx, my, sync_btn_x, sync_btn_y, sync_btn_w, @divTrunc(L.btn_h, 2))) {
-                        if (db) |*d| d.deinit();
-                        db = null;
-                        for (rows.items) |r| r.deinit(allocator);
-                        rows.clearRetainingCapacity();
                         first_use = false;
                         delete_db_err = null;
+                        sync_err = null;
+                        sync_from_browser = true;
+                        delete_confirm_pending = false;
                         phase = .sync_setup;
                     }
                     // Row tap → detail.
@@ -686,8 +697,10 @@ pub fn main() !void {
             // ---- Sync setup --------------------------------------------
             .sync_setup => {
                 // Portrait form layout — must match the draw section exactly.
+                // When entered from browser a header is shown; shift form down.
+                const form_top = if (sync_from_browser) L.hdr_h + L.pad else L.pad * 2;
                 const fw = sw - 2 * L.pad;
-                const title_y = L.pad * 2;
+                const title_y = form_top;
                 const sub_y = title_y + L.fs_hdr + L.pad;
                 const ip_label_y = sub_y + L.fs_label + L.pad * 2;
                 const ip_field_y = ip_label_y + L.fs_label + 6;
@@ -695,6 +708,12 @@ pub fn main() !void {
                 const pw_field_y = pw_label_y + L.fs_label + 6;
                 const submit_btn_y = pw_field_y + L.fh + L.pad * 2;
                 const del_btn_y = submit_btn_y + L.btn_h + L.pad;
+
+                // P1.2: Back button in header when entered from browser.
+                if (sync_from_browser and is_tap and inRect(mx, my, 0, 0, @divTrunc(sw, 3), L.hdr_h)) {
+                    sync_from_browser = false;
+                    phase = .browser;
+                }
 
                 // Guard: don't open a new dialog while one is already pending.
                 if (rl.isMouseButtonPressed(.left) and sync_pending_field == null) {
@@ -737,16 +756,27 @@ pub fn main() !void {
                     }
                 }
 
-                // Delete DB button.
-                if (!first_use and rl.isMouseButtonPressed(.left) and
-                    inRect(mx, my, L.pad, del_btn_y, fw, L.btn_h))
-                {
-                    if (deleteDb()) {
-                        first_use = true;
-                        delete_db_err = null;
-                        sync_err = null;
+                // P1.3: Delete DB button — two-tap confirmation.
+                if (!first_use and is_tap and inRect(mx, my, L.pad, del_btn_y, fw, L.btn_h)) {
+                    if (delete_confirm_pending) {
+                        // Second tap: actually delete.
+                        if (db) |*d| d.deinit();
+                        db = null;
+                        for (rows.items) |r| r.deinit(allocator);
+                        rows.clearRetainingCapacity();
+                        if (deleteDb()) {
+                            first_use = true;
+                            delete_db_err = null;
+                            sync_err = null;
+                            sync_from_browser = false;
+                        } else {
+                            delete_db_err = "Failed to delete database.";
+                        }
+                        delete_confirm_pending = false;
                     } else {
-                        delete_db_err = "Failed to delete database.";
+                        // First tap: arm confirmation.
+                        delete_confirm_pending = true;
+                        delete_confirm_timer = 3.0;
                     }
                 }
 
@@ -795,13 +825,32 @@ pub fn main() !void {
 
             .sync_result => {
                 const btn_y = sh - L.btn_h - L.pad;
-                if (is_tap and inRect(mx, my, L.pad, btn_y, sw - 2 * L.pad, L.btn_h) and
-                    g_status.load(.acquire) == .done)
-                {
-                    unlock_pw = TextField{ .masked = true };
-                    unlock_err = null;
-                    unlock_dialog_shown = false;
-                    phase = .unlock;
+                const status = g_status.load(.acquire);
+                if (status == .done) {
+                    if (is_tap and inRect(mx, my, L.pad, btn_y, sw - 2 * L.pad, L.btn_h)) {
+                        unlock_pw = TextField{ .masked = true };
+                        unlock_err = null;
+                        unlock_dialog_shown = false;
+                        phase = .unlock;
+                    }
+                } else if (status == .failed) {
+                    // P1.1: Back and Retry buttons on failure.
+                    const half_w = @divTrunc(sw - 3 * L.pad, 2);
+                    if (is_tap and inRect(mx, my, L.pad, btn_y, half_w, L.btn_h)) {
+                        // Back → sync_setup
+                        sync_err = null;
+                        phase = .sync_setup;
+                    } else if (is_tap and inRect(mx, my, 2 * L.pad + half_w, btn_y, half_w, L.btn_h)) {
+                        // Retry → spawn new syncThread
+                        g_status.store(.connecting, .release);
+                        if (std.Thread.spawn(.{}, syncThread, .{})) |thread| {
+                            thread.detach();
+                            phase = .sync_running;
+                        } else |_| {
+                            sync_err = "Failed to start sync thread.";
+                            phase = .sync_setup;
+                        }
+                    }
                 }
             },
         }
@@ -1062,9 +1111,10 @@ pub fn main() !void {
 
             // ---- Sync setup --------------------------------------------
             .sync_setup => {
-                // Portrait vertical form layout.
+                // Portrait vertical form layout — matches input section exactly.
+                const form_top = if (sync_from_browser) L.hdr_h + L.pad else L.pad * 2;
                 const fw = sw - 2 * L.pad;
-                const title_y = L.pad * 2;
+                const title_y = form_top;
                 const sub_y = title_y + L.fs_hdr + L.pad;
                 const ip_label_y = sub_y + L.fs_label + L.pad * 2;
                 const ip_field_y = ip_label_y + L.fs_label + 6;
@@ -1091,8 +1141,14 @@ pub fn main() !void {
                 drawButton(submit_label, L.pad, submit_btn_y, fw, L.btn_h, .sky_blue);
 
                 if (!first_use) {
-                    drawButton("Delete DB", L.pad, del_btn_y, fw, L.btn_h,
-                        .{ .r = 180, .g = 40, .b = 40, .a = 255 });
+                    if (delete_confirm_pending) {
+                        // P1.3: show "Tap again to confirm" in bright red
+                        drawButton("Tap again to confirm delete", L.pad, del_btn_y, fw, L.btn_h,
+                            .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+                    } else {
+                        drawButton("Delete DB", L.pad, del_btn_y, fw, L.btn_h,
+                            .{ .r = 180, .g = 40, .b = 40, .a = 255 });
+                    }
                 }
 
                 const err_y = del_btn_y + L.btn_h + L.pad;
@@ -1103,6 +1159,12 @@ pub fn main() !void {
                 if (comptime !is_android) {
                     rl.drawText("Tab: switch field   Enter: submit",
                         L.pad, sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
+                }
+
+                // P1.2: Back button in header when reached from browser.
+                if (sync_from_browser) {
+                    rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                    rl.drawText("< Back", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
                 }
             },
 
@@ -1123,17 +1185,24 @@ pub fn main() !void {
             .sync_result => {
                 rl.drawText("Loki Sync", L.pad, L.pad * 2, L.fs_hdr, .white);
                 const result_y = @divTrunc(sh, 4);
+                const btn_y = sh - L.btn_h - L.pad;
                 switch (g_status.load(.acquire)) {
                     .done => {
                         rl.drawText("Sync complete!", L.pad, result_y, L.fs_body, .green);
                         rl.drawText(&g_msg_buf, L.pad, result_y + L.fs_body + L.pad, L.fs_label, .green);
-                        drawButton("Open DB", L.pad, sh - L.btn_h - L.pad,
+                        drawButton("Open DB", L.pad, btn_y,
                             sw - 2 * L.pad, L.btn_h,
                             .{ .r = 30, .g = 140, .b = 80, .a = 255 });
                     },
                     .failed => {
                         rl.drawText("Sync failed:", L.pad, result_y, L.fs_body, .red);
                         rl.drawText(&g_msg_buf, L.pad, result_y + L.fs_body + L.pad, L.fs_label, .red);
+                        // P1.1: Back and Retry buttons.
+                        const half_w = @divTrunc(sw - 3 * L.pad, 2);
+                        drawButton("Back", L.pad, btn_y, half_w, L.btn_h,
+                            .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+                        drawButton("Retry", 2 * L.pad + half_w, btn_y, half_w, L.btn_h,
+                            .{ .r = 30, .g = 130, .b = 180, .a = 255 });
                     },
                     else => {},
                 }
