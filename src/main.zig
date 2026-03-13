@@ -298,9 +298,16 @@ fn rowLessThan(_: void, a: BrowserRow, b: BrowserRow) bool {
     return std.mem.order(u8, a.title, b.title) == .lt;
 }
 
+// ---- Edit field metadata ----
+
+const edit_field_labels = [7][:0]const u8{
+    "Title", "Path", "Desc", "URL", "Username", "Password", "Notes",
+};
+const EDIT_PW_IDX: usize = 5;
+
 // ---- App phases ----
 
-const Phase = enum { unlock, browser, detail, sync_setup, sync_running, sync_result };
+const Phase = enum { unlock, browser, detail, edit, sync_setup, sync_running, sync_result };
 
 // ---- DB open + row population ----
 
@@ -342,6 +349,28 @@ fn openDbAndPopulate(
     std.mem.sort(BrowserRow, rows.items, {}, rowLessThan);
 }
 
+fn repopulateRows(
+    allocator: std.mem.Allocator,
+    db: *loki.Database,
+    rows: *std.ArrayListUnmanaged(BrowserRow),
+) !void {
+    for (rows.items) |r| r.deinit(allocator);
+    rows.clearRetainingCapacity();
+    for (db.listEntries()) |ie| {
+        const title = try allocator.dupe(u8, ie.title);
+        errdefer allocator.free(title);
+        const path = try allocator.dupe(u8, ie.path);
+        errdefer allocator.free(path);
+        try rows.append(allocator, .{
+            .entry_id = ie.entry_id,
+            .head_hash = ie.head_hash,
+            .title = title,
+            .path = path,
+        });
+    }
+    std.mem.sort(BrowserRow, rows.items, {}, rowLessThan);
+}
+
 // ---- App entry point ----
 
 pub fn main() !void {
@@ -368,8 +397,17 @@ pub fn main() !void {
 
     // ---- Detail ----
     var detail_entry: ?loki.Entry = null;
+    var detail_entry_id: [20]u8 = undefined;
+    var detail_head_hash: [20]u8 = undefined;
     var detail_show_pw = false;
     var detail_scroll: f32 = 0;
+
+    // ---- Edit ----
+    var edit_fields: [7]TextField = undefined;
+    var edit_pending: ?usize = null; // Android: index of field with an open dialog
+    var edit_err: ?[:0]const u8 = null;
+    var edit_focus: usize = 0; // desktop: focused field index
+    var edit_scroll: f32 = 0;
 
     // ---- Sync ----
     var ip_field = TextField{};
@@ -503,6 +541,8 @@ pub fn main() !void {
                             if (db) |*d| {
                                 if (detail_entry) |e| e.deinit(allocator);
                                 detail_entry = d.getEntry(rows.items[idx].entry_id) catch null;
+                                detail_entry_id = rows.items[idx].entry_id;
+                                detail_head_hash = rows.items[idx].head_hash;
                                 detail_show_pw = false;
                                 detail_scroll = 0;
                                 phase = .detail;
@@ -524,15 +564,122 @@ pub fn main() !void {
                         phase = .browser;
                 }
                 if (is_tap) {
-                    // Back: left half of header.
-                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 2), L.hdr_h))
+                    // Back: left third of header.
+                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 3), L.hdr_h))
                         phase = .browser;
+                    // Edit: right third of header.
+                    if (inRect(mx, my, sw - @divTrunc(sw, 3), 0, @divTrunc(sw, 3), L.hdr_h)) {
+                        if (detail_entry) |e| {
+                            const vals = [7][]const u8{
+                                e.title, e.path, e.description,
+                                e.url, e.username, e.password, e.notes,
+                            };
+                            for (0..7) |fi| {
+                                edit_fields[fi] = TextField{ .masked = fi == EDIT_PW_IDX };
+                                edit_fields[fi].setDefault(vals[fi]);
+                            }
+                        }
+                        edit_pending = null;
+                        edit_err = null;
+                        edit_focus = 0;
+                        edit_scroll = 0;
+                        phase = .edit;
+                    }
                     // Show/hide password toggle (right side of the password row).
                     const pw_row_y = L.hdr_h + L.pad + DETAIL_PW_IDX * L.detail_row_h -
                         @as(i32, @intFromFloat(detail_scroll));
                     const toggle_w = @divTrunc(sw, 5);
                     if (inRect(mx, my, sw - toggle_w - L.pad, pw_row_y, toggle_w, L.detail_row_h))
                         detail_show_pw = !detail_show_pw;
+                }
+            },
+
+            // ---- Edit --------------------------------------------------
+            .edit => {
+                // Scroll handling.
+                if (rl.isMouseButtonDown(.left)) {
+                    edit_scroll -= rl.getMouseDelta().y;
+                }
+                const edit_content_h: f32 = @floatFromInt(7 * L.detail_row_h);
+                const edit_visible_h: f32 = @floatFromInt(sh - L.hdr_h);
+                edit_scroll = std.math.clamp(edit_scroll, 0, @max(0, edit_content_h - edit_visible_h));
+
+                if (comptime is_android) {
+                    // Poll for result from an open dialog.
+                    if (edit_pending) |fi| {
+                        var rbuf: [max_field + 1]u8 = undefined;
+                        const r = pollTextInputDialog(&rbuf, @intCast(rbuf.len));
+                        if (r > 0) {
+                            const n: usize = @intCast(r);
+                            edit_fields[fi].len = n;
+                            @memcpy(edit_fields[fi].buf[0..n], rbuf[0..n]);
+                            edit_pending = null;
+                        } else if (r < 0) {
+                            edit_pending = null;
+                        }
+                    }
+                    // Tap a field row to open its dialog.
+                    if (is_tap and edit_pending == null) {
+                        const scroll_i: i32 = @intFromFloat(edit_scroll);
+                        for (0..7) |fi| {
+                            const fy = L.hdr_h + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
+                            if (fy >= L.hdr_h and inRect(mx, my, 0, fy, sw, L.detail_row_h)) {
+                                edit_fields[fi].showDialog(edit_field_labels[fi].ptr, fi == EDIT_PW_IDX);
+                                edit_pending = fi;
+                                edit_err = null;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Desktop: Tab cycles focus, keyboard types into active field.
+                    if (rl.isKeyPressed(.tab)) edit_focus = (edit_focus + 1) % 7;
+                    if (rl.isKeyPressed(.backspace)) edit_fields[edit_focus].pop();
+                    var ch = rl.getCharPressed();
+                    while (ch != 0) : (ch = rl.getCharPressed()) {
+                        if (ch >= 32 and ch < 127) edit_fields[edit_focus].append(@intCast(ch));
+                    }
+                    // Click a row to focus it.
+                    if (is_tap) {
+                        const scroll_i: i32 = @intFromFloat(edit_scroll);
+                        for (0..7) |fi| {
+                            const fy = L.hdr_h + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
+                            if (inRect(mx, my, 0, fy, sw, L.detail_row_h)) {
+                                edit_focus = fi;
+                                break;
+                            }
+                        }
+                    }
+                    if (rl.isKeyPressed(.escape)) phase = .detail;
+                }
+
+                // Cancel / Save header buttons (both platforms).
+                const hdr_btn_w = @divTrunc(sw, 4);
+                if (is_tap) {
+                    if (inRect(mx, my, 0, 0, hdr_btn_w, L.hdr_h)) {
+                        edit_err = null;
+                        phase = .detail;
+                    }
+                }
+                const do_save = is_tap and inRect(mx, my, sw - hdr_btn_w, 0, hdr_btn_w, L.hdr_h);
+                const do_save_key = if (comptime !is_android) rl.isKeyPressed(.enter) else false;
+                if (do_save or do_save_key) save: {
+                    const d = if (db) |*d_| d_ else { edit_err = "No database."; break :save; };
+                    const new_entry = loki.Entry{
+                        .parent_hash = detail_head_hash,
+                        .title = edit_fields[0].slice(),
+                        .path = edit_fields[1].slice(),
+                        .description = edit_fields[2].slice(),
+                        .url = edit_fields[3].slice(),
+                        .username = edit_fields[4].slice(),
+                        .password = edit_fields[5].slice(),
+                        .notes = edit_fields[6].slice(),
+                    };
+                    _ = d.updateEntry(detail_entry_id, new_entry) catch { edit_err = "Save failed."; break :save; };
+                    d.save() catch { edit_err = "Save failed."; break :save; };
+                    repopulateRows(allocator, d, &rows) catch { edit_err = "Save failed."; break :save; };
+                    browser_scroll = 0;
+                    phase = .browser;
                 }
             },
 
@@ -828,6 +975,89 @@ pub fn main() !void {
                 // Header drawn last so it covers any field rows that scroll up into it.
                 rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
                 rl.drawText("< Back", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
+                const edit_lbl_tw = rl.measureText("Edit", L.fs_body);
+                rl.drawText("Edit", sw - edit_lbl_tw - L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
+            },
+
+            // ---- Edit --------------------------------------------------
+            .edit => {
+                const scroll_i: i32 = @intFromFloat(edit_scroll);
+                const val_x = L.label_w + L.pad;
+
+                // Draw field rows first; header paints over any scroll overflow.
+                for (0..7) |fi| {
+                    const fy = L.hdr_h + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
+                    if (fy + L.detail_row_h <= L.hdr_h or fy > sh) continue;
+
+                    const is_focused = (comptime !is_android) and fi == edit_focus;
+                    const bg: rl.Color = if (is_focused)
+                        .{ .r = 22, .g = 30, .b = 48, .a = 255 }
+                    else if (fi % 2 == 0)
+                        .{ .r = 18, .g = 18, .b = 28, .a = 255 }
+                    else
+                        .{ .r = 26, .g = 26, .b = 38, .a = 255 };
+                    rl.drawRectangle(0, fy, sw, L.detail_row_h, bg);
+
+                    if (fy >= L.hdr_h) {
+                        // Label.
+                        drawSlice(edit_field_labels[fi], L.pad,
+                            fy + @divTrunc(L.detail_row_h - L.fs_label, 2), L.fs_label, .gray);
+
+                        // Value (masked for password when not focused or Android).
+                        const show_plain = fi != EDIT_PW_IDX or
+                            (!is_android and fi == edit_focus);
+                        if (show_plain) {
+                            const val_y = fy + @divTrunc(L.detail_row_h - L.fs_body, 2);
+                            var dbuf: [max_field + 1:0]u8 = std.mem.zeroes([max_field + 1:0]u8);
+                            const n = edit_fields[fi].len;
+                            @memcpy(dbuf[0..n], edit_fields[fi].buf[0..n]);
+                            rl.drawText(&dbuf, val_x, val_y, L.fs_body, .white);
+                            // Cursor for focused field on desktop.
+                            if (is_focused) {
+                                const tw = rl.measureText(&dbuf, L.fs_body);
+                                rl.drawRectangle(val_x + tw, val_y, 2,
+                                    L.fs_body, .sky_blue);
+                            }
+                        } else {
+                            var stars: [64:0]u8 = undefined;
+                            const n = @min(edit_fields[fi].len, 63);
+                            @memset(stars[0..n], '*');
+                            stars[n] = 0;
+                            rl.drawText(&stars, val_x,
+                                fy + @divTrunc(L.detail_row_h - L.fs_body, 2),
+                                L.fs_body, .white);
+                        }
+
+                        // Edit indicator (tap hint on Android).
+                        if (comptime is_android) {
+                            rl.drawText(">", sw - L.pad - L.fs_body,
+                                fy + @divTrunc(L.detail_row_h - L.fs_body, 2),
+                                L.fs_body, .dark_gray);
+                        }
+                    }
+
+                    rl.drawRectangle(0, fy + L.detail_row_h - 1, sw, 1,
+                        .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+                }
+
+                if (edit_err) |msg| {
+                    const ey = sh - L.fs_label - L.pad;
+                    rl.drawText(msg, L.pad, ey, L.fs_label, .orange);
+                }
+
+                // Header drawn last.
+                const hdr_btn_w = @divTrunc(sw, 4);
+                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                rl.drawText("Cancel", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
+                const save_tw = rl.measureText("Save", L.fs_body);
+                rl.drawText("Save", sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2),
+                    @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body,
+                    .{ .r = 80, .g = 200, .b = 100, .a = 255 });
+
+                if (comptime !is_android) {
+                    rl.drawText("Tab: next field   Enter: save   Esc: cancel",
+                        L.pad, sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
+                }
             },
 
             // ---- Sync setup --------------------------------------------
