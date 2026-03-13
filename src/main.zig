@@ -27,6 +27,22 @@ fn writeMsg(comptime fmt: []const u8, args: anytype) void {
     g_msg_buf[s.len] = 0;
 }
 
+// ---- Prefs (persist server IP) ----
+
+fn loadPrefs(base: std.fs.Dir, ip: *TextField) void {
+    var f = base.openFile("loki_prefs", .{}) catch return;
+    defer f.close();
+    var buf: [max_field]u8 = undefined;
+    const n = f.read(&buf) catch return;
+    if (n > 0) ip.setDefault(buf[0..n]);
+}
+
+fn savePrefs(base: std.fs.Dir, ip: []const u8) void {
+    var f = base.createFile("loki_prefs", .{}) catch return;
+    defer f.close();
+    _ = f.writeAll(ip) catch {};
+}
+
 // ---- Filesystem helpers ----
 
 fn openBaseDir() !std.fs.Dir {
@@ -412,6 +428,12 @@ pub fn main() !void {
     // ---- Sync ----
     var ip_field = TextField{};
     ip_field.setDefault("192.168.1.100");
+    // P2.4: load persisted IP (overwrites default if file exists).
+    load_prefs: {
+        var base = openBaseDir() catch break :load_prefs;
+        defer if (comptime is_android) base.close();
+        loadPrefs(base, &ip_field);
+    }
     var sync_pw_field = TextField{ .masked = true };
     var sync_focus_ip = true;
     var sync_err: ?[:0]const u8 = null;
@@ -421,6 +443,12 @@ pub fn main() !void {
     var sync_from_browser = false; // P1.2: track if sync_setup was opened from browser
     var delete_confirm_pending = false; // P1.3: two-tap confirmation for Delete DB
     var delete_confirm_timer: f32 = 0; // P1.3: counts down from 3s
+
+    // ---- Create / Delete / Clipboard ----
+    var edit_is_new = false; // P2.2: true when creating a new entry
+    var detail_delete_confirm_pending = false; // P2.3: two-tap delete confirm
+    var detail_delete_confirm_timer: f32 = 0; // P2.3: counts down from 3s
+    var copy_feedback_timer: f32 = 0; // P2.1: "Copied!" toast countdown
 
     // Tap detection: a release with < 10px of accumulated Y drag is a tap.
     var drag_accum: f32 = 0;
@@ -456,6 +484,16 @@ pub fn main() !void {
                 delete_confirm_timer = 0;
             }
         }
+        // P2.3: tick detail delete-confirm countdown
+        if (detail_delete_confirm_pending) {
+            detail_delete_confirm_timer -= rl.getFrameTime();
+            if (detail_delete_confirm_timer <= 0) {
+                detail_delete_confirm_pending = false;
+                detail_delete_confirm_timer = 0;
+            }
+        }
+        // P2.1: tick copy feedback
+        if (copy_feedback_timer > 0) copy_feedback_timer -= rl.getFrameTime();
 
         // ==================================================================
         // INPUT
@@ -534,6 +572,10 @@ pub fn main() !void {
                     const sync_btn_w = @divTrunc(sw, 5);
                     const sync_btn_x = sw - sync_btn_w - L.pad;
                     const sync_btn_y = @divTrunc(L.hdr_h - @divTrunc(L.btn_h, 2), 2);
+                    // P2.2: "+" FAB at bottom-right.
+                    const fab_size = @divTrunc(sw, 7);
+                    const fab_x = sw - fab_size - L.pad;
+                    const fab_y = sh - fab_size - L.pad;
                     if (inRect(mx, my, sync_btn_x, sync_btn_y, sync_btn_w, @divTrunc(L.btn_h, 2))) {
                         first_use = false;
                         delete_db_err = null;
@@ -541,6 +583,15 @@ pub fn main() !void {
                         sync_from_browser = true;
                         delete_confirm_pending = false;
                         phase = .sync_setup;
+                    } else if (inRect(mx, my, fab_x, fab_y, fab_size, fab_size)) {
+                        // New entry.
+                        for (0..7) |fi| edit_fields[fi] = TextField{ .masked = fi == EDIT_PW_IDX };
+                        edit_is_new = true;
+                        edit_pending = null;
+                        edit_err = null;
+                        edit_focus = 0;
+                        edit_scroll = 0;
+                        phase = .edit;
                     }
                     // Row tap → detail.
                     else if (my >= @as(f32, @floatFromInt(L.hdr_h))) {
@@ -574,12 +625,16 @@ pub fn main() !void {
                     if (rl.isKeyPressed(.escape) or rl.isKeyPressed(.backspace))
                         phase = .browser;
                 }
+                const del_btn_h = L.btn_h;
+                const del_btn_y = sh - del_btn_h - L.pad;
                 if (is_tap) {
                     // Back: left third of header.
-                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 3), L.hdr_h))
+                    if (inRect(mx, my, 0, 0, @divTrunc(sw, 3), L.hdr_h)) {
+                        detail_delete_confirm_pending = false;
                         phase = .browser;
+                    }
                     // Edit: right third of header.
-                    if (inRect(mx, my, sw - @divTrunc(sw, 3), 0, @divTrunc(sw, 3), L.hdr_h)) {
+                    else if (inRect(mx, my, sw - @divTrunc(sw, 3), 0, @divTrunc(sw, 3), L.hdr_h)) {
                         if (detail_entry) |e| {
                             const vals = [7][]const u8{
                                 e.title, e.path, e.description,
@@ -590,18 +645,61 @@ pub fn main() !void {
                                 edit_fields[fi].setDefault(vals[fi]);
                             }
                         }
+                        edit_is_new = false;
                         edit_pending = null;
                         edit_err = null;
                         edit_focus = 0;
                         edit_scroll = 0;
                         phase = .edit;
                     }
+                    // P2.3: Delete button (pinned bottom).
+                    else if (inRect(mx, my, L.pad, del_btn_y, sw - 2 * L.pad, del_btn_h)) {
+                        if (detail_delete_confirm_pending) {
+                            if (db) |*d| {
+                                d.deleteEntry(detail_entry_id) catch {};
+                                d.save() catch {};
+                                repopulateRows(allocator, d, &rows) catch {};
+                            }
+                            if (detail_entry) |e| e.deinit(allocator);
+                            detail_entry = null;
+                            detail_delete_confirm_pending = false;
+                            phase = .browser;
+                        } else {
+                            detail_delete_confirm_pending = true;
+                            detail_delete_confirm_timer = 3.0;
+                        }
+                    }
                     // Show/hide password toggle (right side of the password row).
-                    const pw_row_y = L.hdr_h + L.pad + DETAIL_PW_IDX * L.detail_row_h -
-                        @as(i32, @intFromFloat(detail_scroll));
-                    const toggle_w = @divTrunc(sw, 5);
-                    if (inRect(mx, my, sw - toggle_w - L.pad, pw_row_y, toggle_w, L.detail_row_h))
-                        detail_show_pw = !detail_show_pw;
+                    else {
+                        const scroll_i: i32 = @intFromFloat(detail_scroll);
+                        const toggle_w = @divTrunc(sw, 5);
+                        const pw_row_y = L.hdr_h + L.pad + DETAIL_PW_IDX * L.detail_row_h - scroll_i;
+                        if (inRect(mx, my, sw - toggle_w - L.pad, pw_row_y, toggle_w, L.detail_row_h)) {
+                            detail_show_pw = !detail_show_pw;
+                        }
+                        // P2.1: tap any field row → copy value to clipboard.
+                        else if (my >= @as(f32, @floatFromInt(L.hdr_h)) and
+                            my < @as(f32, @floatFromInt(del_btn_y)))
+                        {
+                            if (detail_entry) |e| {
+                                const vals = [7][]const u8{
+                                    e.title, e.path, e.description,
+                                    e.url, e.username, e.password, e.notes,
+                                };
+                                for (0..7) |fi| {
+                                    const fy = L.hdr_h + L.pad + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
+                                    if (inRect(mx, my, 0, fy, sw, L.detail_row_h)) {
+                                        var cbuf: [max_field + 1:0]u8 = std.mem.zeroes([max_field + 1:0]u8);
+                                        const n = @min(vals[fi].len, max_field);
+                                        @memcpy(cbuf[0..n], vals[fi][0..n]);
+                                        rl.setClipboardText(&cbuf);
+                                        copy_feedback_timer = 1.5;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
 
@@ -677,7 +775,7 @@ pub fn main() !void {
                 if (do_save or do_save_key) save: {
                     const d = if (db) |*d_| d_ else { edit_err = "No database."; break :save; };
                     const new_entry = loki.Entry{
-                        .parent_hash = detail_head_hash,
+                        .parent_hash = if (edit_is_new) null else detail_head_hash,
                         .title = edit_fields[0].slice(),
                         .path = edit_fields[1].slice(),
                         .description = edit_fields[2].slice(),
@@ -686,11 +784,29 @@ pub fn main() !void {
                         .password = edit_fields[5].slice(),
                         .notes = edit_fields[6].slice(),
                     };
-                    _ = d.updateEntry(detail_entry_id, new_entry) catch { edit_err = "Save failed."; break :save; };
-                    d.save() catch { edit_err = "Save failed."; break :save; };
-                    repopulateRows(allocator, d, &rows) catch { edit_err = "Save failed."; break :save; };
-                    browser_scroll = 0;
-                    phase = .browser;
+                    if (edit_is_new) {
+                        // P2.2: create new entry, land in browser.
+                        _ = d.createEntry(new_entry) catch { edit_err = "Save failed."; break :save; };
+                        d.save() catch { edit_err = "Save failed."; break :save; };
+                        repopulateRows(allocator, d, &rows) catch { edit_err = "Save failed."; break :save; };
+                        browser_scroll = 0;
+                        phase = .browser;
+                    } else {
+                        // Update existing entry.
+                        _ = d.updateEntry(detail_entry_id, new_entry) catch { edit_err = "Save failed."; break :save; };
+                        d.save() catch { edit_err = "Save failed."; break :save; };
+                        repopulateRows(allocator, d, &rows) catch { edit_err = "Save failed."; break :save; };
+                        // P2.5: return to detail with refreshed data.
+                        if (detail_entry) |e| e.deinit(allocator);
+                        detail_entry = d.getEntry(detail_entry_id) catch null;
+                        for (rows.items) |r| {
+                            if (std.mem.eql(u8, &r.entry_id, &detail_entry_id)) {
+                                detail_head_hash = r.head_hash;
+                                break;
+                            }
+                        }
+                        phase = .detail;
+                    }
                 }
             },
 
@@ -792,6 +908,12 @@ pub fn main() !void {
                         @memcpy(g_pw[0..sync_pw_field.len], sync_pw_field.buf[0..sync_pw_field.len]);
                         g_pw_len = sync_pw_field.len;
                         g_status.store(.connecting, .release);
+                        // P2.4: persist the IP before launching.
+                        save_prefs: {
+                            var base = openBaseDir() catch break :save_prefs;
+                            defer if (comptime is_android) base.close();
+                            savePrefs(base, ip_field.slice());
+                        }
                         if (std.Thread.spawn(.{}, syncThread, .{})) |thread| {
                             thread.detach();
                             phase = .sync_running;
@@ -945,6 +1067,13 @@ pub fn main() !void {
                 const sync_btn_y = @divTrunc(L.hdr_h - sync_btn_h, 2);
                 drawButton("Sync", sync_btn_x, sync_btn_y, sync_btn_w, sync_btn_h,
                     .{ .r = 30, .g = 130, .b = 180, .a = 255 });
+
+                // P2.2: "+" FAB button.
+                const fab_size = @divTrunc(sw, 7);
+                const fab_x = sw - fab_size - L.pad;
+                const fab_y = sh - fab_size - L.pad;
+                drawButton("+", fab_x, fab_y, fab_size, fab_size,
+                    .{ .r = 0, .g = 135, .b = 190, .a = 255 });
             },
 
             // ---- Detail ------------------------------------------------
@@ -1016,9 +1145,35 @@ pub fn main() !void {
                         .{ .r = 40, .g = 40, .b = 55, .a = 255 });
                 }
 
+                // P2.3: Delete button pinned at bottom.
+                const del_btn_h = L.btn_h;
+                const del_btn_y = sh - del_btn_h - L.pad;
+                if (detail_delete_confirm_pending) {
+                    drawButton("Tap again to confirm delete", L.pad, del_btn_y,
+                        sw - 2 * L.pad, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+                } else {
+                    drawButton("Delete", L.pad, del_btn_y,
+                        sw - 2 * L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
+                }
+
+                // P2.1: "Copied!" toast.
+                if (copy_feedback_timer > 0) {
+                    const toast = "Copied!";
+                    const ttw = rl.measureText(toast, L.fs_body);
+                    const toast_pad = L.pad * 2;
+                    const toast_w = ttw + toast_pad * 2;
+                    const toast_h = L.fs_body + toast_pad;
+                    const toast_x = @divTrunc(sw - toast_w, 2);
+                    const toast_y = del_btn_y - toast_h - L.pad;
+                    rl.drawRectangle(toast_x, toast_y, toast_w, toast_h,
+                        .{ .r = 30, .g = 30, .b = 30, .a = 220 });
+                    rl.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2),
+                        L.fs_body, .white);
+                }
+
                 if (comptime !is_android) {
                     rl.drawText("h: pw  Esc: back", L.pad,
-                        sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
+                        sh - L.fs_small - L.pad - del_btn_h - L.pad, L.fs_small, .dark_gray);
                 }
 
                 // Header drawn last so it covers any field rows that scroll up into it.
