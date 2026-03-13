@@ -701,28 +701,12 @@ pub fn main() !void {
 
             // ---- Browser -----------------------------------------------
             .browser => {
-                // Header bar.
-                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-                rl.drawText("Loki", L.pad, @divTrunc(L.hdr_h - L.fs_hdr, 2), L.fs_hdr, .white);
-
-                // Sync button (top-right, half button height so it sits neatly in the header).
-                const sync_btn_w = @divTrunc(sw, 5);
-                const sync_btn_h = @divTrunc(L.btn_h, 2);
-                const sync_btn_x = sw - sync_btn_w - L.pad;
-                const sync_btn_y = @divTrunc(L.hdr_h - sync_btn_h, 2);
-                drawButton("Sync", sync_btn_x, sync_btn_y, sync_btn_w, sync_btn_h,
-                    .{ .r = 30, .g = 130, .b = 180, .a = 255 });
-
-                if (rows.items.len == 0) {
-                    rl.drawText("No entries.", L.pad, L.hdr_h + L.pad, L.fs_body, .gray);
-                }
-
+                // Draw rows first so the header can paint over any overflow.
                 const list_top = L.hdr_h;
-                rl.beginScissorMode(0, list_top, sw, sh - list_top);
                 for (rows.items, 0..) |row, i| {
                     const row_y = list_top + @as(i32, @intCast(i)) * L.row_h -
                         @as(i32, @intFromFloat(browser_scroll));
-                    if (row_y + L.row_h < list_top or row_y > sh) continue;
+                    if (row_y + L.row_h <= list_top or row_y > sh) continue;
 
                     const bg: rl.Color = if (i % 2 == 0)
                         .{ .r = 18, .g = 18, .b = 28, .a = 255 }
@@ -730,25 +714,41 @@ pub fn main() !void {
                         .{ .r = 24, .g = 24, .b = 36, .a = 255 };
                     rl.drawRectangle(0, row_y, sw, L.row_h, bg);
 
-                    // Title and path stacked vertically, vertically centered in the row.
-                    const text_block_h = if (row.path.len > 0)
-                        L.fs_body + @divTrunc(L.pad, 2) + L.fs_small
-                    else
-                        L.fs_body;
-                    const text_y = row_y + @divTrunc(L.row_h - text_block_h, 2);
+                    // Only draw text if the row is at least partially below the header.
+                    if (row_y >= list_top) {
+                        const text_block_h = if (row.path.len > 0)
+                            L.fs_body + @divTrunc(L.pad, 2) + L.fs_small
+                        else
+                            L.fs_body;
+                        const text_y = row_y + @divTrunc(L.row_h - text_block_h, 2);
 
-                    drawSlice(row.title, L.pad, text_y, L.fs_body, .white);
-                    if (row.path.len > 0) {
-                        drawSlice(row.path, L.pad, text_y + L.fs_body + @divTrunc(L.pad, 2), L.fs_small, .gray);
+                        drawSlice(row.title, L.pad, text_y, L.fs_body, .white);
+                        if (row.path.len > 0) {
+                            drawSlice(row.path, L.pad, text_y + L.fs_body + @divTrunc(L.pad, 2), L.fs_small, .gray);
+                        }
+
+                        rl.drawText(">", sw - L.pad - L.fs_body,
+                            row_y + @divTrunc(L.row_h - L.fs_body, 2), L.fs_body, .dark_gray);
                     }
-
-                    rl.drawText(">", sw - L.pad - L.fs_body,
-                        row_y + @divTrunc(L.row_h - L.fs_body, 2), L.fs_body, .dark_gray);
 
                     rl.drawRectangle(0, row_y + L.row_h - 1, sw, 1,
                         .{ .r = 40, .g = 40, .b = 55, .a = 255 });
                 }
-                rl.endScissorMode();
+
+                if (rows.items.len == 0) {
+                    rl.drawText("No entries.", L.pad, L.hdr_h + L.pad, L.fs_body, .gray);
+                }
+
+                // Header drawn last so it always covers scrolled row content.
+                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                rl.drawText("Loki", L.pad, @divTrunc(L.hdr_h - L.fs_hdr, 2), L.fs_hdr, .white);
+
+                const sync_btn_w = @divTrunc(sw, 5);
+                const sync_btn_h = @divTrunc(L.btn_h, 2);
+                const sync_btn_x = sw - sync_btn_w - L.pad;
+                const sync_btn_y = @divTrunc(L.hdr_h - sync_btn_h, 2);
+                drawButton("Sync", sync_btn_x, sync_btn_y, sync_btn_w, sync_btn_h,
+                    .{ .r = 30, .g = 130, .b = 180, .a = 255 });
             },
 
             // ---- Detail ------------------------------------------------
@@ -758,13 +758,7 @@ pub fn main() !void {
                     return;
                 };
 
-                // Header.
-                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-                rl.drawText("< Back", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
-
-                // Scrollable field list.
-                rl.beginScissorMode(0, L.hdr_h, sw, sh - L.hdr_h);
-
+                // Draw fields first; header paints over any scroll overflow below.
                 const scroll_i: i32 = @intFromFloat(detail_scroll);
                 const val_x = L.label_w + L.pad;
                 const toggle_w = @divTrunc(sw, 5);
@@ -831,7 +825,9 @@ pub fn main() !void {
                         sh - L.fs_small - L.pad, L.fs_small, .dark_gray);
                 }
 
-                rl.endScissorMode();
+                // Header drawn last so it covers any field rows that scroll up into it.
+                rl.drawRectangle(0, 0, sw, L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+                rl.drawText("< Back", L.pad, @divTrunc(L.hdr_h - L.fs_body, 2), L.fs_body, .sky_blue);
             },
 
             // ---- Sync setup --------------------------------------------
