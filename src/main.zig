@@ -10,6 +10,7 @@ const is_android = builtin.abi.isAndroid();
 
 const server_port: u16 = 7777;
 const db_name = "loki_db";
+const connect_timeout_ms: i32 = 10_000;
 
 // ---- Sync thread state ----
 
@@ -49,32 +50,79 @@ fn deleteDb() bool {
     return true;
 }
 
+// ---- Network helpers ----
+
+/// Non-blocking connect with a `connect_timeout_ms` deadline.
+/// Returns `error.ConnectionTimedOut` when the server doesn't respond in time.
+fn tcpConnectTimeout(addr: std.net.Address) !std.net.Stream {
+    const sockfd = try std.posix.socket(
+        addr.any.family,
+        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+        std.posix.IPPROTO.TCP,
+    );
+    errdefer std.posix.close(sockfd);
+
+    std.posix.connect(sockfd, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock => {}, // EINPROGRESS — expected for non-blocking connect
+        else => return err,
+    };
+
+    var pfd = [1]std.posix.pollfd{.{
+        .fd = sockfd,
+        .events = std.posix.POLL.OUT,
+        .revents = 0,
+    }};
+    const n = try std.posix.poll(&pfd, connect_timeout_ms);
+    if (n == 0) return error.ConnectionTimedOut;
+
+    if (pfd[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0)
+        return error.ConnectionRefused;
+
+    // Restore blocking mode (clear O_NONBLOCK = 0x800 from the flags word).
+    const flags: usize = @intCast(try std.posix.fcntl(sockfd, std.posix.F.GETFL, 0));
+    _ = try std.posix.fcntl(sockfd, std.posix.F.SETFL, flags & ~@as(usize, 0x800));
+
+    return .{ .handle = sockfd };
+}
+
 // ---- Background sync ----
 
-fn doSync(allocator: std.mem.Allocator, base_dir: std.fs.Dir) !loki.sync.core.SyncResult {
+fn doSync(allocator: std.mem.Allocator, base_dir: std.fs.Dir) !void {
     const ip = g_ip[0..g_ip_len];
     const pw = g_pw[0..g_pw_len];
 
-    var db = loki.Database.open(allocator, base_dir, db_name, pw) catch |err| blk: {
-        if (err != error.FileNotFound) return err;
-        break :blk try loki.Database.create(allocator, base_dir, db_name, pw);
-    };
-    defer db.deinit();
-
-    g_status.store(.connecting, .release);
-
+    // Connect first — DB is only created if the connection succeeds.
     const addr = try std.net.Address.parseIp(ip, server_port);
-    const stream = try std.net.tcpConnectToAddress(addr);
+    const stream = try tcpConnectTimeout(addr);
     defer stream.close();
 
     g_status.store(.syncing, .release);
 
     var r = stream.reader(&.{});
     var w = stream.writer(&.{});
-    var conflicts: std.ArrayList(loki.model.merge.ConflictEntry) = .{};
-    defer conflicts.deinit(allocator);
+    const ri = r.interface();
+    const wi = &w.interface;
 
-    return tcp_sync.syncSession(allocator, &db, r.interface(), &w.interface, .client, &conflicts);
+    if (!dbDirExists()) {
+        // First use: send the fetch discriminator and pull the whole database.
+        try wi.writeAll(&[_]u8{tcp_sync.protocol_fetch});
+        try tcp_sync.fetchClient(allocator, pw, base_dir, db_name, ri, wi);
+        writeMsg("Fetch complete.", .{});
+    } else {
+        // Subsequent run: bidirectional sync with an existing database.
+        try wi.writeAll(&[_]u8{tcp_sync.protocol_sync});
+        var db = try loki.Database.open(allocator, base_dir, db_name, pw);
+        defer db.deinit();
+        var conflicts: std.ArrayList(loki.model.merge.ConflictEntry) = .{};
+        defer conflicts.deinit(allocator);
+        const result = try tcp_sync.syncSession(allocator, &db, ri, wi, .client, &conflicts);
+        writeMsg("pushed:{d} pulled:{d} new:{d} conflicts:{d}", .{
+            result.objects_pushed,
+            result.objects_pulled,
+            result.new_to_local,
+            result.conflicts,
+        });
+    }
 }
 
 fn syncThread() void {
@@ -89,18 +137,15 @@ fn syncThread() void {
     };
     defer if (is_android) base_dir.close();
 
-    const result = doSync(allocator, base_dir) catch |err| {
-        writeMsg("{s}", .{@errorName(err)});
+    doSync(allocator, base_dir) catch |err| {
+        switch (err) {
+            error.ConnectionTimedOut => writeMsg("Connection timed out (10s).", .{}),
+            else => writeMsg("{s}", .{@errorName(err)}),
+        }
         g_status.store(.failed, .release);
         return;
     };
 
-    writeMsg("pushed:{d} pulled:{d} new:{d} conflicts:{d}", .{
-        result.objects_pushed,
-        result.objects_pulled,
-        result.new_to_local,
-        result.conflicts,
-    });
     g_status.store(.done, .release);
 }
 
@@ -493,14 +538,19 @@ pub fn main() !void {
 
             // ---- Sync setup --------------------------------------------
             .sync_setup => {
-                // Portrait form layout (computed from L).
+                // Portrait form layout — must match the draw section exactly.
                 const fw = sw - 2 * L.pad;
-                const ip_field_y = L.hdr_h + L.pad * 2 + L.fs_label + 6;
-                const pw_field_y = ip_field_y + L.fh + L.pad + L.fs_label + 6;
+                const title_y = L.pad * 2;
+                const sub_y = title_y + L.fs_hdr + L.pad;
+                const ip_label_y = sub_y + L.fs_label + L.pad * 2;
+                const ip_field_y = ip_label_y + L.fs_label + 6;
+                const pw_label_y = ip_field_y + L.fh + L.pad;
+                const pw_field_y = pw_label_y + L.fs_label + 6;
                 const submit_btn_y = pw_field_y + L.fh + L.pad * 2;
                 const del_btn_y = submit_btn_y + L.btn_h + L.pad;
 
-                if (rl.isMouseButtonPressed(.left)) {
+                // Guard: don't open a new dialog while one is already pending.
+                if (rl.isMouseButtonPressed(.left) and sync_pending_field == null) {
                     if (inRect(mx, my, L.pad, ip_field_y, fw, L.fh)) {
                         sync_focus_ip = true;
                         if (comptime is_android) {
@@ -579,7 +629,21 @@ pub fn main() !void {
 
             .sync_running => {
                 const s = g_status.load(.acquire);
-                if (s == .done or s == .failed) phase = .sync_result;
+                if (s == .done) {
+                    // Auto-open with the sync password so the user lands
+                    // directly in the browser without a second password entry.
+                    openDbAndPopulate(allocator, &db, &rows, sync_pw_field.slice()) catch {};
+                    if (db != null) {
+                        browser_scroll = 0;
+                        phase = .browser;
+                    } else {
+                        // Auto-open failed (shouldn't happen) — fall back to
+                        // the result screen where the user can tap "Open DB".
+                        phase = .sync_result;
+                    }
+                } else if (s == .failed) {
+                    phase = .sync_result;
+                }
             },
 
             .sync_result => {
@@ -820,7 +884,7 @@ pub fn main() !void {
             .sync_running => {
                 rl.drawText("Loki Sync", L.pad, L.pad * 2, L.fs_hdr, .white);
                 const status_text: [:0]const u8 = switch (g_status.load(.acquire)) {
-                    .connecting => "Connecting...",
+                    .connecting => "Connecting... (10s timeout)",
                     .syncing => "Syncing...",
                     else => "Please wait...",
                 };
