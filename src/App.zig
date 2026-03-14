@@ -83,6 +83,10 @@ search_focused: bool = false,
 // Clipboard toast
 copy_feedback_timer: f32 = 0,
 
+// Current directory path in the hierarchical browser
+browser_path_buf: [ui.max_field]u8 = std.mem.zeroes([ui.max_field]u8),
+browser_path_len: usize = 0,
+
 // ---- Helpers for field defaults ----
 
 fn defaultEditFields() [7]ui.TextField {
@@ -228,6 +232,70 @@ fn repopulateRows(self: *Self, d: *loki.Database) !void {
 }
 
 // ============================================================
+// BROWSER NAVIGATION HELPERS
+// ============================================================
+
+fn browserPath(self: *const Self) []const u8 {
+    return self.browser_path_buf[0..self.browser_path_len];
+}
+
+/// Append `dir_name` to the current path (e.g. "" + "Social" → "Social").
+fn navigateInto(self: *Self, dir_name: []const u8) void {
+    const cur = self.browserPath();
+    var new_len: usize = 0;
+    if (cur.len > 0) {
+        const n = @min(cur.len, ui.max_field - 1);
+        @memcpy(self.browser_path_buf[0..n], cur[0..n]);
+        self.browser_path_buf[n] = '/';
+        new_len = n + 1;
+    }
+    const remaining = ui.max_field - new_len;
+    const dn = @min(dir_name.len, remaining);
+    @memcpy(self.browser_path_buf[new_len .. new_len + dn], dir_name[0..dn]);
+    self.browser_path_len = new_len + dn;
+    self.browser_scroll = 0;
+}
+
+/// Truncate path to parent (e.g. "Social/Twitter" → "Social", "Social" → "").
+fn navigateUp(self: *Self) void {
+    const cur = self.browserPath();
+    if (cur.len == 0) return;
+    const last_slash = std.mem.lastIndexOfScalar(u8, cur, '/');
+    self.browser_path_len = if (last_slash) |i| i else 0;
+    self.browser_scroll = 0;
+}
+
+/// If `row_path` is a direct child directory of `parent_path`, return the
+/// immediate subdirectory name; otherwise return null.
+///
+/// Examples (parent=""):
+///   row_path="Social"         → "Social"
+///   row_path="Social/Twitter" → "Social"
+///   row_path=""               → null  (entry at root, not a subdir)
+///
+/// Examples (parent="Social"):
+///   row_path="Social/Twitter" → "Twitter"
+///   row_path="Social"         → null  (entry lives IN Social, not a subdir)
+///   row_path=""               → null
+fn subdirName(row_path: []const u8, parent_path: []const u8) ?[]const u8 {
+    const rest = if (parent_path.len == 0) blk: {
+        if (row_path.len == 0) return null; // entry is at root, not in a subdir
+        break :blk row_path;
+    } else blk: {
+        // row_path must start with "parent_path/"
+        if (row_path.len <= parent_path.len) return null;
+        if (!std.mem.eql(u8, row_path[0..parent_path.len], parent_path)) return null;
+        if (row_path[parent_path.len] != '/') return null;
+        const r = row_path[parent_path.len + 1 ..];
+        if (r.len == 0) return null;
+        break :blk r;
+    };
+    // Return the immediate child directory name (up to the first '/', or all of rest).
+    if (std.mem.indexOfScalar(u8, rest, '/')) |slash_pos| return rest[0..slash_pos];
+    return rest;
+}
+
+// ============================================================
 // INPUT
 // ============================================================
 
@@ -252,6 +320,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             };
             if (self.db != null) {
                 self.browser_scroll = 0;
+                self.browser_path_len = 0;
                 self.phase = .browser;
             }
         } else if (poll < 0) {
@@ -281,6 +350,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             };
             if (self.db != null) {
                 self.browser_scroll = 0;
+                self.browser_path_len = 0;
                 self.phase = .browser;
             }
         }
@@ -293,6 +363,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
     }
     const search_bar_h = c.L.fh + c.L.pad;
     const list_top = c.L.hdr_h + search_bar_h;
+    const is_searching = self.search_field.len > 0;
 
     if (comptime is_android) {
         if (self.search_pending) {
@@ -337,14 +408,38 @@ fn inputBrowser(self: *Self, c: Ctx) void {
                 }
             }
         }
+        // Backspace (when not searching) navigates up a directory level
+        if (!self.search_focused and rl.isKeyPressed(.backspace)) {
+            self.navigateUp();
+        }
     }
 
-    // Scroll clamping
-    var match_count: i32 = 0;
-    for (self.rows.items) |row| {
-        if (ui.matchesSearch(row, self.search_field.slice())) match_count += 1;
+    // Scroll clamping: count visible rows (dirs + entries) in current view
+    var row_count: i32 = 0;
+    if (is_searching) {
+        for (self.rows.items) |row| {
+            if (ui.matchesSearch(row, self.search_field.slice())) row_count += 1;
+        }
+    } else {
+        const cur_path = self.browserPath();
+        var seen_dirs: [256][]const u8 = undefined;
+        var seen_dirs_len: usize = 0;
+        for (self.rows.items) |row| {
+            if (std.mem.eql(u8, row.path, cur_path)) {
+                row_count += 1; // direct entry
+            } else if (subdirName(row.path, cur_path)) |dn| {
+                var already = false;
+                for (seen_dirs[0..seen_dirs_len]) |s| {
+                    if (std.mem.eql(u8, s, dn)) { already = true; break; }
+                }
+                if (!already) {
+                    if (seen_dirs_len < 256) { seen_dirs[seen_dirs_len] = dn; seen_dirs_len += 1; }
+                    row_count += 1;
+                }
+            }
+        }
     }
-    const content_h: f32 = @floatFromInt(match_count * c.L.row_h);
+    const content_h: f32 = @floatFromInt(row_count * c.L.row_h);
     const visible_h: f32 = @floatFromInt(c.sh - list_top);
     self.browser_scroll = std.math.clamp(self.browser_scroll, 0, @max(0, content_h - visible_h));
 
@@ -377,6 +472,11 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.unlock_err = null;
             self.unlock_dialog_shown = false;
             self.phase = .unlock;
+        } else if (!is_searching and self.browser_path_len > 0 and
+            ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h))
+        {
+            // "< Back" tap — navigate up
+            self.navigateUp();
         } else if (ui.inRect(c.mx, c.my, fab_x, fab_y, fab_size, fab_size)) {
             for (0..7) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.EDIT_PW_IDX };
             self.edit_is_new = true;
@@ -391,22 +491,69 @@ fn inputBrowser(self: *Self, c: Ctx) void {
                 @as(i32, @intFromFloat(self.browser_scroll));
             const idx_i = @divTrunc(rel_y, c.L.row_h);
             if (idx_i >= 0) {
-                var visible_i: i32 = 0;
-                for (self.rows.items) |row| {
-                    if (!ui.matchesSearch(row, self.search_field.slice())) continue;
-                    if (visible_i == idx_i) {
-                        if (self.db) |*d| {
-                            if (self.detail_entry) |e| e.deinit(self.allocator);
-                            self.detail_entry = d.getEntry(row.entry_id) catch null;
-                            self.detail_entry_id = row.entry_id;
-                            self.detail_head_hash = row.head_hash;
-                            self.detail_show_pw = false;
-                            self.detail_scroll = 0;
-                            self.phase = .detail;
+                if (is_searching) {
+                    // Flat search result — tap opens detail
+                    var visible_i: i32 = 0;
+                    for (self.rows.items) |row| {
+                        if (!ui.matchesSearch(row, self.search_field.slice())) continue;
+                        if (visible_i == idx_i) {
+                            if (self.db) |*d| {
+                                if (self.detail_entry) |e| e.deinit(self.allocator);
+                                self.detail_entry = d.getEntry(row.entry_id) catch null;
+                                self.detail_entry_id = row.entry_id;
+                                self.detail_head_hash = row.head_hash;
+                                self.detail_show_pw = false;
+                                self.detail_scroll = 0;
+                                self.phase = .detail;
+                            }
+                            break;
                         }
-                        break;
+                        visible_i += 1;
                     }
-                    visible_i += 1;
+                } else {
+                    // Hierarchical view — build the ordered list the same way drawBrowser does
+                    const cur_path = self.browserPath();
+                    var visible_i: i32 = 0;
+                    var handled = false;
+                    var seen_dirs2: [256][]const u8 = undefined;
+                    var seen_dirs2_len: usize = 0;
+                    // First pass: subdirectories (in order of first appearance)
+                    for (self.rows.items) |row| {
+                        if (subdirName(row.path, cur_path)) |dn| {
+                            var already = false;
+                            for (seen_dirs2[0..seen_dirs2_len]) |s| {
+                                if (std.mem.eql(u8, s, dn)) { already = true; break; }
+                            }
+                            if (!already) {
+                                if (seen_dirs2_len < 256) { seen_dirs2[seen_dirs2_len] = dn; seen_dirs2_len += 1; }
+                                if (visible_i == idx_i) {
+                                    self.navigateInto(dn);
+                                    handled = true;
+                                    break;
+                                }
+                                visible_i += 1;
+                            }
+                        }
+                    }
+                    // Second pass: direct entries
+                    if (!handled) {
+                        for (self.rows.items) |row| {
+                            if (!std.mem.eql(u8, row.path, cur_path)) continue;
+                            if (visible_i == idx_i) {
+                                if (self.db) |*d| {
+                                    if (self.detail_entry) |e| e.deinit(self.allocator);
+                                    self.detail_entry = d.getEntry(row.entry_id) catch null;
+                                    self.detail_entry_id = row.entry_id;
+                                    self.detail_head_hash = row.head_hash;
+                                    self.detail_show_pw = false;
+                                    self.detail_scroll = 0;
+                                    self.phase = .detail;
+                                }
+                                break;
+                            }
+                            visible_i += 1;
+                        }
+                    }
                 }
             }
         }
@@ -728,6 +875,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
             self.sync_err = null;
             self.sync_ip_err = false;
             self.sync_pw_err = false;
+            self.browser_path_len = 0;
             self.phase = .browser;
         }
     }
@@ -772,6 +920,7 @@ fn inputSyncRunning(self: *Self, c: Ctx) void {
         self.openDbAndPopulate(self.sync_pw_field.slice()) catch {};
         if (self.db != null) {
             self.browser_scroll = 0;
+            self.browser_path_len = 0;
             self.phase = .browser;
         } else {
             self.phase = .sync_result;
@@ -841,45 +990,102 @@ fn drawUnlock(self: *Self, c: Ctx) void {
 fn drawBrowser(self: *Self, c: Ctx) void {
     const search_bar_h = c.L.fh + c.L.pad;
     const list_top = c.L.hdr_h + search_bar_h;
-    var draw_row_idx: i32 = 0;
+    const is_searching = self.search_field.len > 0;
+    var draw_idx: i32 = 0;
     var any_visible = false;
-    for (self.rows.items) |row| {
-        if (!ui.matchesSearch(row, self.search_field.slice())) continue;
-        any_visible = true;
-        const row_y = list_top + draw_row_idx * c.L.row_h -
-            @as(i32, @intFromFloat(self.browser_scroll));
-        draw_row_idx += 1;
-        if (row_y + c.L.row_h <= list_top or row_y > c.sh) continue;
 
-        const bg: rl.Color = if (@mod(draw_row_idx, 2) == 0)
-            .{ .r = 18, .g = 18, .b = 28, .a = 255 }
-        else
-            .{ .r = 24, .g = 24, .b = 36, .a = 255 };
-        rl.drawRectangle(0, row_y, c.sw, c.L.row_h, bg);
+    if (is_searching) {
+        // Flat search results
+        for (self.rows.items) |row| {
+            if (!ui.matchesSearch(row, self.search_field.slice())) continue;
+            any_visible = true;
+            const row_y = list_top + draw_idx * c.L.row_h -
+                @as(i32, @intFromFloat(self.browser_scroll));
+            draw_idx += 1;
+            if (row_y + c.L.row_h <= list_top or row_y > c.sh) continue;
 
-        if (row_y >= list_top) {
-            const text_block_h = if (row.path.len > 0)
-                c.L.fs_body + @divTrunc(c.L.pad, 2) + c.L.fs_small
+            const bg: rl.Color = if (@mod(draw_idx, 2) == 0)
+                .{ .r = 18, .g = 18, .b = 28, .a = 255 }
             else
-                c.L.fs_body;
-            const text_y = row_y + @divTrunc(c.L.row_h - text_block_h, 2);
-            ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
-            if (row.path.len > 0) {
-                ui.drawSlice(row.path, c.L.pad, text_y + c.L.fs_body + @divTrunc(c.L.pad, 2), c.L.fs_small, .gray);
+                .{ .r = 24, .g = 24, .b = 36, .a = 255 };
+            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, bg);
+
+            if (row_y >= list_top) {
+                const text_block_h = if (row.path.len > 0)
+                    c.L.fs_body + @divTrunc(c.L.pad, 2) + c.L.fs_small
+                else
+                    c.L.fs_body;
+                const text_y = row_y + @divTrunc(c.L.row_h - text_block_h, 2);
+                ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
+                if (row.path.len > 0) {
+                    ui.drawSlice(row.path, c.L.pad, text_y + c.L.fs_body + @divTrunc(c.L.pad, 2), c.L.fs_small, .gray);
+                }
+                rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
             }
-            rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
+            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
         }
-        rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+    } else {
+        // Hierarchical view
+        const cur_path = self.browserPath();
+
+        // First pass: immediate subdirectories (in stable first-appearance order)
+        var seen_dirs: [256][]const u8 = undefined;
+        var seen_dirs_len: usize = 0;
+        for (self.rows.items) |row| {
+            const dn = subdirName(row.path, cur_path) orelse continue;
+            var already = false;
+            for (seen_dirs[0..seen_dirs_len]) |s| {
+                if (std.mem.eql(u8, s, dn)) { already = true; break; }
+            }
+            if (already) continue;
+            if (seen_dirs_len < 256) { seen_dirs[seen_dirs_len] = dn; seen_dirs_len += 1; }
+
+            any_visible = true;
+            const row_y = list_top + draw_idx * c.L.row_h -
+                @as(i32, @intFromFloat(self.browser_scroll));
+            draw_idx += 1;
+            if (row_y + c.L.row_h <= list_top or row_y > c.sh) continue;
+
+            // Directory row — dark blue background, folder icon "▸", sky-blue name
+            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, .{ .r = 10, .g = 20, .b = 40, .a = 255 });
+            const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
+            rl.drawText("\xe2\x96\xb8", c.L.pad, text_y, c.L.fs_body, .sky_blue); // UTF-8 ▸
+            ui.drawSlice(dn, c.L.pad + c.L.fs_body + @divTrunc(c.L.pad, 2), text_y, c.L.fs_body, .sky_blue);
+            rl.drawText("/", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .{ .r = 60, .g = 120, .b = 200, .a = 255 });
+            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 30, .g = 50, .b = 80, .a = 255 });
+        }
+
+        // Second pass: direct entries in this directory
+        for (self.rows.items) |row| {
+            if (!std.mem.eql(u8, row.path, cur_path)) continue;
+            any_visible = true;
+            const row_y = list_top + draw_idx * c.L.row_h -
+                @as(i32, @intFromFloat(self.browser_scroll));
+            draw_idx += 1;
+            if (row_y + c.L.row_h <= list_top or row_y > c.sh) continue;
+
+            const bg: rl.Color = if (@mod(draw_idx, 2) == 0)
+                .{ .r = 18, .g = 18, .b = 28, .a = 255 }
+            else
+                .{ .r = 24, .g = 24, .b = 36, .a = 255 };
+            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, bg);
+
+            if (row_y >= list_top) {
+                const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
+                ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
+                rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .dark_gray);
+            }
+            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+        }
     }
 
     if (!any_visible) {
-        const msg: [:0]const u8 = if (self.search_field.len > 0) "No results." else "No entries.";
+        const msg: [:0]const u8 = if (is_searching) "No results." else "Empty.";
         rl.drawText(msg, c.L.pad, list_top + c.L.pad, c.L.fs_body, .gray);
     }
 
     // Header (drawn last so it covers scrolled content)
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    rl.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
 
     const hdr_btn_h = @divTrunc(c.L.btn_h, 2);
     const hdr_btn_y = @divTrunc(c.L.hdr_h - hdr_btn_h, 2);
@@ -887,6 +1093,22 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     const sync_btn_x = c.sw - sync_btn_w - c.L.pad;
     const lock_btn_w = @divTrunc(c.sw, 6);
     const lock_btn_x = sync_btn_x - lock_btn_w - c.L.pad;
+
+    if (!is_searching and self.browser_path_len > 0) {
+        // In a subdirectory: show "< Back" and current dir name
+        rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+        const cur = self.browserPath();
+        const last_slash = std.mem.lastIndexOfScalar(u8, cur, '/');
+        const dir_name = if (last_slash) |i| cur[i + 1 ..] else cur;
+        var dbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+        const dn = @min(dir_name.len, ui.max_field);
+        @memcpy(dbuf[0..dn], dir_name[0..dn]);
+        const dtw = rl.measureText(&dbuf, c.L.fs_hdr);
+        rl.drawText(&dbuf, @divTrunc(c.sw - dtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+    } else {
+        rl.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+    }
+
     ui.drawButton("Sync", sync_btn_x, hdr_btn_y, sync_btn_w, hdr_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
     ui.drawButton("Lock", lock_btn_x, hdr_btn_y, lock_btn_w, hdr_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
 
