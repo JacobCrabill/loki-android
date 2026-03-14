@@ -116,6 +116,7 @@ pub const edit_field_labels = [7][:0]const u8{
     "Title", "Path", "Desc", "URL", "Username", "Password", "Notes",
 };
 pub const EDIT_PW_IDX: usize = 5;
+pub const EDIT_NOTES_IDX: usize = 6;
 pub const DETAIL_PW_IDX: i32 = 5;
 
 // ---- Draw helpers ----

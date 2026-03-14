@@ -654,9 +654,11 @@ fn inputEdit(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonDown(.left)) {
         self.edit_scroll -= rl.getMouseDelta().y;
     }
-    const edit_content_h: f32 = @floatFromInt(7 * c.L.detail_row_h);
+    const notes_h = c.L.detail_row_h * 4;
+    const edit_content_h: f32 = @floatFromInt(6 * c.L.detail_row_h + notes_h);
     const edit_visible_h: f32 = @floatFromInt(c.sh - c.L.hdr_h);
     self.edit_scroll = std.math.clamp(self.edit_scroll, 0, @max(0, edit_content_h - edit_visible_h));
+    const enter_pressed = if (comptime !is_android) rl.isKeyPressed(.enter) else false;
 
     if (comptime is_android) {
         if (self.edit_pending) |fi| {
@@ -675,8 +677,9 @@ fn inputEdit(self: *Self, c: Ctx) void {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
             const toggle_w = @divTrunc(c.sw, 5);
             for (0..7) |fi| {
+                const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-                if (fy >= c.L.hdr_h and ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
+                if (fy >= c.L.hdr_h and ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
                     if (fi == ui.EDIT_PW_IDX and
                         ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, fy, toggle_w, c.L.detail_row_h))
                     {
@@ -693,6 +696,10 @@ fn inputEdit(self: *Self, c: Ctx) void {
     } else {
         if (rl.isKeyPressed(.tab)) self.edit_focus = (self.edit_focus + 1) % 7;
         if (rl.isKeyPressed(.backspace)) self.edit_fields[self.edit_focus].pop();
+        // Enter: insert newline when Notes is focused, otherwise handled as save below
+        if (enter_pressed and self.edit_focus == ui.EDIT_NOTES_IDX) {
+            self.edit_fields[ui.EDIT_NOTES_IDX].append('\n');
+        }
         var ch = rl.getCharPressed();
         while (ch != 0) : (ch = rl.getCharPressed()) {
             if (ch >= 32 and ch < 127) self.edit_fields[self.edit_focus].append(@intCast(ch));
@@ -700,8 +707,9 @@ fn inputEdit(self: *Self, c: Ctx) void {
         if (c.is_tap) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
             for (0..7) |fi| {
+                const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-                if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
+                if (ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
                     self.edit_focus = fi;
                     break;
                 }
@@ -717,7 +725,8 @@ fn inputEdit(self: *Self, c: Ctx) void {
         self.phase = .detail;
     }
     const do_save = c.is_tap and ui.inRect(c.mx, c.my, c.sw - hdr_btn_w, 0, hdr_btn_w, c.L.hdr_h);
-    const do_save_key = if (comptime !is_android) rl.isKeyPressed(.enter) else false;
+    // Enter saves unless Notes is focused (where it inserts a newline instead)
+    const do_save_key = enter_pressed and self.edit_focus != ui.EDIT_NOTES_IDX;
     if (do_save or do_save_key) self.doSave();
 }
 
@@ -1232,10 +1241,12 @@ fn drawDetail(self: *Self, c: Ctx) void {
 fn drawEdit(self: *Self, c: Ctx) void {
     const scroll_i: i32 = @intFromFloat(self.edit_scroll);
     const val_x = c.L.label_w + c.L.pad;
+    const notes_h = c.L.detail_row_h * 4;
 
     for (0..7) |fi| {
+        const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
         const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-        if (fy + c.L.detail_row_h <= c.L.hdr_h or fy > c.sh) continue;
+        if (fy + row_h <= c.L.hdr_h or fy > c.sh) continue;
 
         const is_focused = (comptime !is_android) and fi == self.edit_focus;
         const bg: rl.Color = if (is_focused)
@@ -1244,46 +1255,76 @@ fn drawEdit(self: *Self, c: Ctx) void {
             .{ .r = 18, .g = 18, .b = 28, .a = 255 }
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-        rl.drawRectangle(0, fy, c.sw, c.L.detail_row_h, bg);
+        rl.drawRectangle(0, fy, c.sw, row_h, bg);
 
         if (fy >= c.L.hdr_h) {
-            ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
-
-            const is_pw_field = fi == ui.EDIT_PW_IDX;
-            const show_plain = !is_pw_field or
-                (if (comptime is_android) self.edit_show_pw else fi == self.edit_focus);
-            const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
-
-            if (show_plain) {
-                var dbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
-                const n = self.edit_fields[fi].len;
-                @memcpy(dbuf[0..n], self.edit_fields[fi].buf[0..n]);
-                rl.drawText(&dbuf, val_x, val_y, c.L.fs_body, .white);
-                if (is_focused) {
-                    const tw = rl.measureText(&dbuf, c.L.fs_body);
-                    rl.drawRectangle(val_x + tw, val_y, 2, c.L.fs_body, .sky_blue);
+            if (fi == ui.EDIT_NOTES_IDX) {
+                // Multi-line Notes field
+                ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + c.L.pad, c.L.fs_label, .gray);
+                const notes_fs = c.L.fs_body;
+                const line_spacing = notes_fs + @divTrunc(notes_fs, 3);
+                const notes_text = self.edit_fields[fi].buf[0..self.edit_fields[fi].len];
+                var seg_start: usize = 0;
+                var ly = fy + c.L.pad + c.L.fs_label + @divTrunc(c.L.pad, 2);
+                var cursor_x: i32 = val_x;
+                var cursor_y: i32 = ly;
+                while (true) {
+                    const nl = std.mem.indexOfScalarPos(u8, notes_text, seg_start, '\n');
+                    const seg_end = nl orelse notes_text.len;
+                    const seg = notes_text[seg_start..seg_end];
+                    var lbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                    const ln = @min(seg.len, ui.max_field);
+                    @memcpy(lbuf[0..ln], seg[0..ln]);
+                    if (ly < fy + notes_h - notes_fs) rl.drawText(&lbuf, val_x, ly, notes_fs, .white);
+                    cursor_y = ly;
+                    cursor_x = val_x + rl.measureText(&lbuf, notes_fs);
+                    if (nl == null) break;
+                    seg_start = seg_end + 1;
+                    ly += line_spacing;
+                }
+                if (is_focused) rl.drawRectangle(cursor_x, cursor_y, 2, notes_fs, .sky_blue);
+                if (comptime is_android) {
+                    rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
                 }
             } else {
-                var stars: [64:0]u8 = undefined;
-                const n = @min(self.edit_fields[fi].len, 63);
-                @memset(stars[0..n], '*');
-                stars[n] = 0;
-                rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
-            }
+                ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
-            if (comptime is_android) {
-                if (is_pw_field) {
-                    const toggle_w = @divTrunc(c.sw, 5);
-                    const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
-                    const toggle_label: [:0]const u8 = if (self.edit_show_pw) "Hide" else "Show";
-                    ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                const is_pw_field = fi == ui.EDIT_PW_IDX;
+                const show_plain = !is_pw_field or
+                    (if (comptime is_android) self.edit_show_pw else fi == self.edit_focus);
+                const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
+
+                if (show_plain) {
+                    var dbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                    const n = self.edit_fields[fi].len;
+                    @memcpy(dbuf[0..n], self.edit_fields[fi].buf[0..n]);
+                    rl.drawText(&dbuf, val_x, val_y, c.L.fs_body, .white);
+                    if (is_focused) {
+                        const tw = rl.measureText(&dbuf, c.L.fs_body);
+                        rl.drawRectangle(val_x + tw, val_y, 2, c.L.fs_body, .sky_blue);
+                    }
                 } else {
-                    rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
+                    var stars: [64:0]u8 = undefined;
+                    const n = @min(self.edit_fields[fi].len, 63);
+                    @memset(stars[0..n], '*');
+                    stars[n] = 0;
+                    rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
+                }
+
+                if (comptime is_android) {
+                    if (is_pw_field) {
+                        const toggle_w = @divTrunc(c.sw, 5);
+                        const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
+                        const toggle_label: [:0]const u8 = if (self.edit_show_pw) "Hide" else "Show";
+                        ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                    } else {
+                        rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
+                    }
                 }
             }
         }
 
-        rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+        rl.drawRectangle(0, fy + row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
     }
 
     if (self.edit_err) |msg| {
@@ -1298,7 +1339,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
     rl.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
 
     if (comptime !is_android) {
-        rl.drawText("Tab: next field   Enter: save   Esc: cancel", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("Tab: next   Enter: newline(Notes)/save   Esc: cancel", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 }
 
