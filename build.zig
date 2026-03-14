@@ -2,8 +2,6 @@ const std = @import("std");
 const android = @import("android");
 const LinkMode = std.builtin.LinkMode;
 
-const exe_name = "loki-android";
-
 pub fn build(b: *std.Build) void {
     const root_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -81,11 +79,11 @@ pub fn build(b: *std.Build) void {
 
             apk.addArtifact(b.addLibrary(.{
                 .linkage = .dynamic,
-                .name = exe_name,
+                .name = "loki-android",
                 .root_module = app,
             }));
         } else {
-            const exe = b.addExecutable(.{ .name = exe_name, .root_module = app });
+            const exe = b.addExecutable(.{ .name = "loki-desktop", .root_module = app });
             b.installArtifact(exe);
 
             const run_exe = b.addRunArtifact(exe);
