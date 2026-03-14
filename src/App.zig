@@ -58,8 +58,10 @@ edit_pending: ?usize = null,
 edit_err: ?[:0]const u8 = null,
 edit_focus: usize = 0,
 edit_scroll: f32 = 0,
+edit_notes_scroll: f32 = 0,
 edit_is_new: bool = false,
 edit_show_pw: bool = false,
+drag_in_notes: bool = false,
 
 // Sync setup
 ip_field: ui.TextField = .{},
@@ -491,6 +493,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.edit_err = null;
             self.edit_focus = 0;
             self.edit_scroll = 0;
+            self.edit_notes_scroll = 0;
             self.phase = .edit;
         } else if (c.my >= @as(f32, @floatFromInt(list_top))) {
             const rel_y = @as(i32, @intFromFloat(c.my)) - list_top +
@@ -604,6 +607,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
             self.edit_err = null;
             self.edit_focus = 0;
             self.edit_scroll = 0;
+            self.edit_notes_scroll = 0;
             self.phase = .edit;
         } else if (ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h)) {
             if (self.detail_delete_confirm_pending) {
@@ -651,13 +655,27 @@ fn inputDetail(self: *Self, c: Ctx) void {
 }
 
 fn inputEdit(self: *Self, c: Ctx) void {
-    if (rl.isMouseButtonDown(.left)) {
-        self.edit_scroll -= rl.getMouseDelta().y;
-    }
     const notes_h = c.L.detail_row_h * 4;
+
+    // On press, decide whether the drag belongs to the Notes inner scroll or the form scroll.
+    if (rl.isMouseButtonPressed(.left)) {
+        const si: i32 = @intFromFloat(self.edit_scroll);
+        const notes_fy = c.L.hdr_h + @as(i32, @intCast(ui.EDIT_NOTES_IDX)) * c.L.detail_row_h - si;
+        self.drag_in_notes = ui.inRect(c.mx, c.my, 0, notes_fy, c.sw, notes_h);
+    }
+    if (rl.isMouseButtonDown(.left)) {
+        if (self.drag_in_notes) {
+            self.edit_notes_scroll -= rl.getMouseDelta().y;
+        } else {
+            self.edit_scroll -= rl.getMouseDelta().y;
+        }
+    }
+
+    // Clamp form scroll.
     const edit_content_h: f32 = @floatFromInt(6 * c.L.detail_row_h + notes_h);
     const edit_visible_h: f32 = @floatFromInt(c.sh - c.L.hdr_h);
     self.edit_scroll = std.math.clamp(self.edit_scroll, 0, @max(0, edit_content_h - edit_visible_h));
+
     const enter_pressed = if (comptime !is_android) rl.isKeyPressed(.enter) else false;
 
     if (comptime is_android) {
@@ -704,6 +722,10 @@ fn inputEdit(self: *Self, c: Ctx) void {
         while (ch != 0) : (ch = rl.getCharPressed()) {
             if (ch >= 32 and ch < 127) self.edit_fields[self.edit_focus].append(@intCast(ch));
         }
+        // After typing in Notes, scroll to end to keep cursor visible.
+        if (self.edit_focus == ui.EDIT_NOTES_IDX) {
+            self.edit_notes_scroll = std.math.floatMax(f32); // clamped to max on next frame
+        }
         if (c.is_tap) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
             for (0..7) |fi| {
@@ -717,6 +739,20 @@ fn inputEdit(self: *Self, c: Ctx) void {
         }
         if (rl.isKeyPressed(.escape)) self.phase = .detail;
     }
+
+    // Clamp Notes inner scroll (after input so floatMax auto-scroll is resolved here).
+    const notes_fs = c.L.fs_body;
+    const notes_line_spacing = notes_fs + @divTrunc(notes_fs, 3);
+    const notes_text_top_offset = c.L.pad + c.L.fs_label + @divTrunc(c.L.pad, 2);
+    const notes_visible_h = notes_h - notes_text_top_offset;
+    var notes_line_count: i32 = 1;
+    for (self.edit_fields[ui.EDIT_NOTES_IDX].buf[0..self.edit_fields[ui.EDIT_NOTES_IDX].len]) |ch| {
+        if (ch == '\n') notes_line_count += 1;
+    }
+    const notes_content_h: f32 = @floatFromInt(notes_line_count * notes_line_spacing);
+    self.edit_notes_scroll = std.math.clamp(
+        self.edit_notes_scroll, 0, @max(0, notes_content_h - @as(f32, @floatFromInt(notes_visible_h))),
+    );
 
     // Cancel / Save (both platforms)
     const hdr_btn_w = @divTrunc(c.sw, 4);
@@ -1259,15 +1295,18 @@ fn drawEdit(self: *Self, c: Ctx) void {
 
         if (fy >= c.L.hdr_h) {
             if (fi == ui.EDIT_NOTES_IDX) {
-                // Multi-line Notes field
+                // Multi-line Notes field with inner scroll
                 ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + c.L.pad, c.L.fs_label, .gray);
                 const notes_fs = c.L.fs_body;
                 const line_spacing = notes_fs + @divTrunc(notes_fs, 3);
+                const text_top = fy + c.L.pad + c.L.fs_label + @divTrunc(c.L.pad, 2);
+                const text_bottom = fy + notes_h;
+                const notes_scroll_i: i32 = @intFromFloat(self.edit_notes_scroll);
                 const notes_text = self.edit_fields[fi].buf[0..self.edit_fields[fi].len];
                 var seg_start: usize = 0;
-                var ly = fy + c.L.pad + c.L.fs_label + @divTrunc(c.L.pad, 2);
+                var ly = text_top - notes_scroll_i;
                 var cursor_x: i32 = val_x;
-                var cursor_y: i32 = ly;
+                var cursor_y: i32 = text_top;
                 while (true) {
                     const nl = std.mem.indexOfScalarPos(u8, notes_text, seg_start, '\n');
                     const seg_end = nl orelse notes_text.len;
@@ -1275,14 +1314,18 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     var lbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                     const ln = @min(seg.len, ui.max_field);
                     @memcpy(lbuf[0..ln], seg[0..ln]);
-                    if (ly < fy + notes_h - notes_fs) rl.drawText(&lbuf, val_x, ly, notes_fs, .white);
                     cursor_y = ly;
                     cursor_x = val_x + rl.measureText(&lbuf, notes_fs);
+                    if (ly >= text_top - notes_fs and ly < text_bottom) {
+                        rl.drawText(&lbuf, val_x, ly, notes_fs, .white);
+                    }
                     if (nl == null) break;
                     seg_start = seg_end + 1;
                     ly += line_spacing;
                 }
-                if (is_focused) rl.drawRectangle(cursor_x, cursor_y, 2, notes_fs, .sky_blue);
+                if (is_focused and cursor_y >= text_top and cursor_y < text_bottom) {
+                    rl.drawRectangle(cursor_x, cursor_y, 2, notes_fs, .sky_blue);
+                }
                 if (comptime is_android) {
                     rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
                 }
