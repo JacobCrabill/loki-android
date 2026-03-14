@@ -8,6 +8,7 @@ pub const is_android = builtin.abi.isAndroid();
 // ---- Android text-input dialog ----
 
 pub extern fn showTextInputDialog(title: [*c]const u8, current: [*c]const u8, is_password: c_int) void;
+pub extern fn showTextInputDialogMultiline(title: [*c]const u8, current: [*c]const u8) void;
 pub extern fn pollTextInputDialog(out_buf: [*]u8, buf_size: c_int) c_int;
 
 // ---- Text input field ----
@@ -45,6 +46,14 @@ pub const TextField = struct {
             var tmp: [max_field + 1]u8 = std.mem.zeroes([max_field + 1]u8);
             @memcpy(tmp[0..self.len], self.buf[0..self.len]);
             showTextInputDialog(title, &tmp, @intFromBool(is_password));
+        }
+    }
+
+    pub fn showDialogMultiline(self: *const TextField, title: [*c]const u8) void {
+        if (comptime is_android) {
+            var tmp: [max_field + 1]u8 = std.mem.zeroes([max_field + 1]u8);
+            @memcpy(tmp[0..self.len], self.buf[0..self.len]);
+            showTextInputDialogMultiline(title, &tmp);
         }
     }
 };

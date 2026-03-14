@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.text.InputType;
 import android.util.DisplayMetrics;
+import android.view.Gravity;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
@@ -41,6 +42,55 @@ public class TextInput {
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT);
                 params.setMargins(pad, 0, pad, 0);
+                container.addView(editText, params);
+
+                new AlertDialog.Builder(activity)
+                    .setTitle(title)
+                    .setView(container)
+                    .setPositiveButton("OK", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            nativeOnTextResult(editText.getText().toString());
+                        }
+                    })
+                    .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialog, int which) {
+                            nativeOnTextResult(null);
+                        }
+                    })
+                    .setCancelable(false)
+                    .show();
+            }
+        });
+    }
+
+    /** Multi-line variant for the Notes field. */
+    public static void showMultiline(final Activity activity,
+                                     final String title,
+                                     final String current) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                final EditText editText = new EditText(activity);
+                editText.setInputType(
+                    InputType.TYPE_CLASS_TEXT |
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE |
+                    InputType.TYPE_TEXT_FLAG_IME_MULTI_LINE);
+                editText.setMinLines(4);
+                editText.setGravity(Gravity.TOP | Gravity.START);
+                if (current != null && !current.isEmpty()) {
+                    editText.setText(current);
+                    editText.setSelection(editText.getText().length());
+                }
+
+                FrameLayout container = new FrameLayout(activity);
+                DisplayMetrics dm = activity.getResources().getDisplayMetrics();
+                int pad = (int)(20 * dm.density);
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT);
+                params.setMargins(pad, pad, pad, 0);
                 container.addView(editText, params);
 
                 new AlertDialog.Builder(activity)

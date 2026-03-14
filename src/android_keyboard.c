@@ -61,8 +61,9 @@ static jclass find_class(JNIEnv *env, const char *name) {
 // Dialog result state
 // ---------------------------------------------------------------------------
 
-static char       g_text_buf[256];
+static char       g_text_buf[512];
 static atomic_int g_text_ready = 0;  // 0=idle, 1=ok, -1=cancelled
+static int        g_natives_registered = 0;
 
 // Called by Java (UI thread) when the dialog is dismissed.
 // Also registered explicitly via RegisterNatives (see showTextInputDialog) so
@@ -122,15 +123,14 @@ void showTextInputDialog(const char *title, const char *current, int is_password
 
     // Explicitly bind nativeOnTextResult so the JVM calls our function pointer
     // directly rather than searching loaded libraries by mangled symbol name.
-    static int natives_registered = 0;
-    if (!natives_registered && cls != NULL) {
+    if (!g_natives_registered && cls != NULL) {
         JNINativeMethod methods[] = {{
             "nativeOnTextResult",
             "(Ljava/lang/String;)V",
             (void *)on_text_result,
         }};
         (*env)->RegisterNatives(env, cls, methods, 1);
-        natives_registered = 1;
+        g_natives_registered = 1;
     }
 
     jmethodID show     = (*env)->GetStaticMethodID(env, cls, "show",
@@ -141,6 +141,41 @@ void showTextInputDialog(const char *title, const char *current, int is_password
 
     (*env)->CallStaticVoidMethod(env, cls, show,
         activity, jtitle, jcurrent, (jboolean)is_password);
+
+    (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, jtitle);
+    (*env)->DeleteLocalRef(env, jcurrent);
+
+    if (detach) (*vm)->DetachCurrentThread(vm);
+}
+
+// Schedule a multi-line text-input dialog (for the Notes field).
+void showTextInputDialogMultiline(const char *title, const char *current) {
+    atomic_store(&g_text_ready, 0);
+
+    int     detach;
+    JNIEnv *env = attach(&detach);
+    JavaVM *vm  = GetAndroidApp()->activity->vm;
+
+    jclass cls = find_class(env, "com.zig.loki.TextInput");
+
+    if (!g_natives_registered && cls != NULL) {
+        JNINativeMethod methods[] = {{
+            "nativeOnTextResult",
+            "(Ljava/lang/String;)V",
+            (void *)on_text_result,
+        }};
+        (*env)->RegisterNatives(env, cls, methods, 1);
+        g_natives_registered = 1;
+    }
+
+    jmethodID show    = (*env)->GetStaticMethodID(env, cls, "showMultiline",
+        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V");
+    jobject  activity = GetAndroidApp()->activity->clazz;
+    jstring  jtitle   = (*env)->NewStringUTF(env, title   ? title   : "");
+    jstring  jcurrent = (*env)->NewStringUTF(env, current ? current : "");
+
+    (*env)->CallStaticVoidMethod(env, cls, show, activity, jtitle, jcurrent);
 
     (*env)->DeleteLocalRef(env, cls);
     (*env)->DeleteLocalRef(env, jtitle);
@@ -162,5 +197,5 @@ int pollTextInputDialog(char *out_buf, int buf_size) {
     int n   = len < buf_size - 1 ? len : buf_size - 1;
     memcpy(out_buf, g_text_buf, n);
     out_buf[n] = '\0';
-    return n;
+    return n + 1;  // >0 means success; caller subtracts 1 to get actual length
 }

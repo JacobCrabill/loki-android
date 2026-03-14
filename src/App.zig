@@ -310,7 +310,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
         var rbuf: [ui.max_field + 1]u8 = undefined;
         const poll = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
         if (poll > 0) {
-            const n: usize = @intCast(poll);
+            const n: usize = @intCast(poll - 1);
             self.unlock_pw.len = n;
             @memcpy(self.unlock_pw.buf[0..n], rbuf[0..n]);
             self.unlock_dialog_shown = false;
@@ -372,7 +372,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             var rbuf: [ui.max_field + 1]u8 = undefined;
             const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
             if (r > 0) {
-                const n: usize = @intCast(r);
+                const n: usize = @intCast(r - 1);
                 self.search_field.len = n;
                 @memcpy(self.search_field.buf[0..n], rbuf[0..n]);
                 self.browser_scroll = 0;
@@ -683,7 +683,7 @@ fn inputEdit(self: *Self, c: Ctx) void {
             var rbuf: [ui.max_field + 1]u8 = undefined;
             const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
             if (r > 0) {
-                const n: usize = @intCast(r);
+                const n: usize = @intCast(r - 1);
                 self.edit_fields[fi].len = n;
                 @memcpy(self.edit_fields[fi].buf[0..n], rbuf[0..n]);
                 self.edit_pending = null;
@@ -702,6 +702,10 @@ fn inputEdit(self: *Self, c: Ctx) void {
                         ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, fy, toggle_w, c.L.detail_row_h))
                     {
                         self.edit_show_pw = !self.edit_show_pw;
+                    } else if (fi == ui.EDIT_NOTES_IDX) {
+                        self.edit_fields[fi].showDialogMultiline(ui.edit_field_labels[fi].ptr);
+                        self.edit_pending = fi;
+                        self.edit_err = null;
                     } else {
                         self.edit_fields[fi].showDialog(ui.edit_field_labels[fi].ptr, fi == ui.EDIT_PW_IDX and !self.edit_show_pw);
                         self.edit_pending = fi;
@@ -861,7 +865,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
             const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
             if (r > 0) {
                 const field = if (is_ip) &self.ip_field else &self.sync_pw_field;
-                const n: usize = @intCast(r);
+                const n: usize = @intCast(r - 1);
                 field.len = n;
                 @memcpy(field.buf[0..n], rbuf[0..n]);
                 self.sync_pending_field = null;
