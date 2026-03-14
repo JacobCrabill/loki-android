@@ -17,6 +17,7 @@ const connect_timeout_ms: i32 = 10_000;
 const SyncStatus = enum(u8) { connecting, syncing, done, failed };
 var g_status = std.atomic.Value(SyncStatus).init(.connecting);
 var g_msg_buf = std.mem.zeroes([256:0]u8);
+var g_conflict_count: usize = 0; // written by syncThread before setting .done
 var g_ip: [128]u8 = undefined;
 var g_ip_len: usize = 0;
 var g_pw: [128]u8 = undefined;
@@ -132,6 +133,7 @@ fn doSync(allocator: std.mem.Allocator, base_dir: std.fs.Dir) !void {
         var conflicts: std.ArrayList(loki.model.merge.ConflictEntry) = .{};
         defer conflicts.deinit(allocator);
         const result = try tcp_sync.syncSession(allocator, &db, ri, wi, .client, &conflicts);
+        g_conflict_count = result.conflicts;
         writeMsg("pushed:{d} pulled:{d} new:{d} conflicts:{d}", .{
             result.objects_pushed,
             result.objects_pulled,
@@ -172,7 +174,7 @@ extern fn pollTextInputDialog(out_buf: [*]u8, buf_size: c_int) c_int;
 
 // ---- Text input field ----
 
-const max_field = 127;
+const max_field = 511; // 3.6: larger limit so the Notes field isn't cramped
 
 const TextField = struct {
     buf: [max_field + 1]u8 = std.mem.zeroes([max_field + 1]u8),
@@ -214,9 +216,12 @@ fn fsByHeight(h: i32) i32 {
     return @max(12, @divTrunc(h * 11, 20));
 }
 
-fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: bool) void {
+fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: bool, err: bool) void {
     rl.drawRectangle(x, y, w, h, if (focused) .white else .light_gray);
-    rl.drawRectangleLines(x, y, w, h, if (focused) .sky_blue else .gray);
+    const border: rl.Color = if (err) .{ .r = 220, .g = 50, .b = 50, .a = 255 }
+        else if (focused) .sky_blue
+        else .gray;
+    rl.drawRectangleLines(x, y, w, h, border);
 
     var disp: [max_field + 1:0]u8 = std.mem.zeroes([max_field + 1:0]u8);
     if (f.masked) {
@@ -387,6 +392,23 @@ fn repopulateRows(
     std.mem.sort(BrowserRow, rows.items, {}, rowLessThan);
 }
 
+// ---- Search helpers ----
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn matchesSearch(row: BrowserRow, query: []const u8) bool {
+    if (query.len == 0) return true;
+    return containsIgnoreCase(row.title, query) or containsIgnoreCase(row.path, query);
+}
+
 // ---- App entry point ----
 
 pub fn main() !void {
@@ -446,9 +468,19 @@ pub fn main() !void {
 
     // ---- Create / Delete / Clipboard ----
     var edit_is_new = false; // P2.2: true when creating a new entry
+    var edit_show_pw = false; // 3.3: show/hide password in edit (Android)
     var detail_delete_confirm_pending = false; // P2.3: two-tap delete confirm
     var detail_delete_confirm_timer: f32 = 0; // P2.3: counts down from 3s
     var copy_feedback_timer: f32 = 0; // P2.1: "Copied!" toast countdown
+
+    // ---- Search ----
+    var search_field = TextField{};
+    var search_pending = false; // Android: dialog open for search field
+    var search_focused = false; // desktop: keyboard input goes to search field
+
+    // ---- Sync field validation errors (3.4) ----
+    var sync_ip_err = false;
+    var sync_pw_err = false;
 
     // Tap detection: a release with < 10px of accumulated Y drag is a tap.
     var drag_accum: f32 = 0;
@@ -563,8 +595,52 @@ pub fn main() !void {
                 if (rl.isMouseButtonDown(.left)) {
                     browser_scroll -= rl.getMouseDelta().y;
                 }
-                const content_h: f32 = @floatFromInt(@as(i32, @intCast(rows.items.len)) * L.row_h);
-                const visible_h: f32 = @floatFromInt(sh - L.hdr_h);
+                const search_bar_h = L.fh + L.pad;
+                const list_top = L.hdr_h + search_bar_h;
+
+                // 3.2: search bar input.
+                if (comptime is_android) {
+                    if (search_pending) {
+                        var rbuf: [max_field + 1]u8 = undefined;
+                        const r = pollTextInputDialog(&rbuf, @intCast(rbuf.len));
+                        if (r > 0) {
+                            const n: usize = @intCast(r);
+                            search_field.len = n;
+                            @memcpy(search_field.buf[0..n], rbuf[0..n]);
+                            browser_scroll = 0;
+                            search_pending = false;
+                        } else if (r < 0) {
+                            search_pending = false;
+                        }
+                    } else if (is_tap and !search_pending and
+                        inRect(mx, my, L.pad, L.hdr_h + @divTrunc(L.pad, 2), sw - 2 * L.pad, L.fh))
+                    {
+                        search_field.showDialog("Search", false);
+                        search_pending = true;
+                    }
+                } else {
+                    if (is_tap and inRect(mx, my, L.pad, L.hdr_h + @divTrunc(L.pad, 2), sw - 2 * L.pad, L.fh)) {
+                        search_focused = true;
+                    } else if (is_tap) {
+                        search_focused = false;
+                    }
+                    if (search_focused) {
+                        if (rl.isKeyPressed(.backspace)) { search_field.pop(); browser_scroll = 0; }
+                        if (rl.isKeyPressed(.escape)) { search_field = TextField{}; search_focused = false; browser_scroll = 0; }
+                        var ch = rl.getCharPressed();
+                        while (ch != 0) : (ch = rl.getCharPressed()) {
+                            if (ch >= 32 and ch < 127) { search_field.append(@intCast(ch)); browser_scroll = 0; }
+                        }
+                    }
+                }
+
+                // Count matching rows for scroll clamping.
+                var match_count: i32 = 0;
+                for (rows.items) |row| {
+                    if (matchesSearch(row, search_field.slice())) match_count += 1;
+                }
+                const content_h: f32 = @floatFromInt(match_count * L.row_h);
+                const visible_h: f32 = @floatFromInt(sh - list_top);
                 browser_scroll = std.math.clamp(browser_scroll, 0, @max(0, content_h - visible_h));
 
                 if (is_tap) {
@@ -602,6 +678,7 @@ pub fn main() !void {
                         // New entry.
                         for (0..7) |fi| edit_fields[fi] = TextField{ .masked = fi == EDIT_PW_IDX };
                         edit_is_new = true;
+                        edit_show_pw = false;
                         edit_pending = null;
                         edit_err = null;
                         edit_focus = 0;
@@ -609,20 +686,28 @@ pub fn main() !void {
                         phase = .edit;
                     }
                     // Row tap → detail.
-                    else if (my >= @as(f32, @floatFromInt(L.hdr_h))) {
-                        const rel_y = @as(i32, @intFromFloat(my)) - L.hdr_h +
+                    else if (my >= @as(f32, @floatFromInt(list_top))) {
+                        const rel_y = @as(i32, @intFromFloat(my)) - list_top +
                             @as(i32, @intFromFloat(browser_scroll));
                         const idx_i = @divTrunc(rel_y, L.row_h);
-                        if (idx_i >= 0 and idx_i < @as(i32, @intCast(rows.items.len))) {
-                            const idx: usize = @intCast(idx_i);
-                            if (db) |*d| {
-                                if (detail_entry) |e| e.deinit(allocator);
-                                detail_entry = d.getEntry(rows.items[idx].entry_id) catch null;
-                                detail_entry_id = rows.items[idx].entry_id;
-                                detail_head_hash = rows.items[idx].head_hash;
-                                detail_show_pw = false;
-                                detail_scroll = 0;
-                                phase = .detail;
+                        if (idx_i >= 0) {
+                            // Map visible index to actual row index (respecting filter).
+                            var visible_i: i32 = 0;
+                            for (rows.items) |row| {
+                                if (!matchesSearch(row, search_field.slice())) continue;
+                                if (visible_i == idx_i) {
+                                    if (db) |*d| {
+                                        if (detail_entry) |e| e.deinit(allocator);
+                                        detail_entry = d.getEntry(row.entry_id) catch null;
+                                        detail_entry_id = row.entry_id;
+                                        detail_head_hash = row.head_hash;
+                                        detail_show_pw = false;
+                                        detail_scroll = 0;
+                                        phase = .detail;
+                                    }
+                                    break;
+                                }
+                                visible_i += 1;
                             }
                         }
                     }
@@ -662,6 +747,7 @@ pub fn main() !void {
                             }
                         }
                         edit_is_new = false;
+                        edit_show_pw = false;
                         edit_pending = null;
                         edit_err = null;
                         edit_focus = 0;
@@ -747,12 +833,20 @@ pub fn main() !void {
                     // Tap a field row to open its dialog.
                     if (is_tap and edit_pending == null) {
                         const scroll_i: i32 = @intFromFloat(edit_scroll);
+                        const toggle_w = @divTrunc(sw, 5);
                         for (0..7) |fi| {
                             const fy = L.hdr_h + @as(i32, @intCast(fi)) * L.detail_row_h - scroll_i;
                             if (fy >= L.hdr_h and inRect(mx, my, 0, fy, sw, L.detail_row_h)) {
-                                edit_fields[fi].showDialog(edit_field_labels[fi].ptr, fi == EDIT_PW_IDX);
-                                edit_pending = fi;
-                                edit_err = null;
+                                // 3.3: show/hide toggle on the password row.
+                                if (fi == EDIT_PW_IDX and
+                                    inRect(mx, my, sw - toggle_w - L.pad, fy, toggle_w, L.detail_row_h))
+                                {
+                                    edit_show_pw = !edit_show_pw;
+                                } else {
+                                    edit_fields[fi].showDialog(edit_field_labels[fi].ptr, fi == EDIT_PW_IDX and !edit_show_pw);
+                                    edit_pending = fi;
+                                    edit_err = null;
+                                }
                                 break;
                             }
                         }
@@ -934,11 +1028,45 @@ pub fn main() !void {
                     }
                 }
 
+                // 3.7: "Create new" button (first-use only, at del_btn_y).
+                if (first_use and is_tap and inRect(mx, my, L.pad, del_btn_y, fw, L.btn_h)) {
+                    create_db: {
+                        if (sync_pw_field.len == 0) {
+                            sync_pw_err = true;
+                            sync_err = "Enter a password for the new database.";
+                            break :create_db;
+                        }
+                        var base = openBaseDir() catch {
+                            sync_err = "Storage error.";
+                            break :create_db;
+                        };
+                        defer if (comptime is_android) base.close();
+                        const created = loki.Database.create(
+                            allocator, base, db_name, sync_pw_field.slice(),
+                        ) catch {
+                            sync_err = "Failed to create database.";
+                            break :create_db;
+                        };
+                        if (db) |*d| d.deinit();
+                        db = created;
+                        for (rows.items) |r| r.deinit(allocator);
+                        rows.clearRetainingCapacity();
+                        first_use = false;
+                        sync_from_browser = false;
+                        sync_err = null;
+                        sync_ip_err = false;
+                        sync_pw_err = false;
+                        phase = .browser;
+                    }
+                }
+
                 // Sync / Fetch button.
                 const clicked_submit = rl.isMouseButtonPressed(.left) and
                     inRect(mx, my, L.pad, submit_btn_y, fw, L.btn_h);
                 if (clicked_submit or rl.isKeyPressed(.enter)) {
                     if (ip_field.len == 0 or sync_pw_field.len == 0) {
+                        sync_ip_err = ip_field.len == 0;
+                        sync_pw_err = sync_pw_field.len == 0;
                         sync_err = "Please enter IP and password.";
                     } else {
                         @memcpy(g_ip[0..ip_field.len], ip_field.buf[0..ip_field.len]);
@@ -956,6 +1084,8 @@ pub fn main() !void {
                             thread.detach();
                             phase = .sync_running;
                             sync_err = null;
+                            sync_ip_err = false;
+                            sync_pw_err = false;
                             delete_db_err = null;
                         } else |_| {
                             sync_err = "Failed to start sync thread.";
@@ -1038,7 +1168,7 @@ pub fn main() !void {
                 // Password field in the middle.
                 const field_y = @divTrunc(sh * 2, 5);
                 const fw = sw - 2 * L.pad;
-                drawTextField(&unlock_pw, L.pad, field_y, fw, L.fh, true);
+                drawTextField(&unlock_pw, L.pad, field_y, fw, L.fh, true, false);
 
                 if (unlock_err) |msg| {
                     const etw = rl.measureText(msg, L.fs_label);
@@ -1055,19 +1185,24 @@ pub fn main() !void {
             // ---- Browser -----------------------------------------------
             .browser => {
                 // Draw rows first so the header can paint over any overflow.
-                const list_top = L.hdr_h;
-                for (rows.items, 0..) |row, i| {
-                    const row_y = list_top + @as(i32, @intCast(i)) * L.row_h -
+                const search_bar_h = L.fh + L.pad;
+                const list_top = L.hdr_h + search_bar_h;
+                var draw_row_idx: i32 = 0;
+                var any_visible = false;
+                for (rows.items) |row| {
+                    if (!matchesSearch(row, search_field.slice())) continue;
+                    any_visible = true;
+                    const row_y = list_top + draw_row_idx * L.row_h -
                         @as(i32, @intFromFloat(browser_scroll));
+                    draw_row_idx += 1;
                     if (row_y + L.row_h <= list_top or row_y > sh) continue;
 
-                    const bg: rl.Color = if (i % 2 == 0)
+                    const bg: rl.Color = if (@mod(draw_row_idx, 2) == 0)
                         .{ .r = 18, .g = 18, .b = 28, .a = 255 }
                     else
                         .{ .r = 24, .g = 24, .b = 36, .a = 255 };
                     rl.drawRectangle(0, row_y, sw, L.row_h, bg);
 
-                    // Only draw text if the row is at least partially below the header.
                     if (row_y >= list_top) {
                         const text_block_h = if (row.path.len > 0)
                             L.fs_body + @divTrunc(L.pad, 2) + L.fs_small
@@ -1086,8 +1221,9 @@ pub fn main() !void {
                     rl.drawRectangle(0, row_y + L.row_h - 1, sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
                 }
 
-                if (rows.items.len == 0) {
-                    rl.drawText("No entries.", L.pad, L.hdr_h + L.pad, L.fs_body, .gray);
+                if (!any_visible) {
+                    const msg: [:0]const u8 = if (search_field.len > 0) "No results." else "No entries.";
+                    rl.drawText(msg, L.pad, list_top + L.pad, L.fs_body, .gray);
                 }
 
                 // Header drawn last so it always covers scrolled row content.
@@ -1102,6 +1238,16 @@ pub fn main() !void {
                 const lock_btn_x = sync_btn_x - lock_btn_w - L.pad;
                 drawButton("Sync", sync_btn_x, hdr_btn_y, sync_btn_w, hdr_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
                 drawButton("Lock", lock_btn_x, hdr_btn_y, lock_btn_w, hdr_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+
+                // 3.2: Search bar drawn below header (always visible).
+                rl.drawRectangle(0, L.hdr_h, sw, search_bar_h, .{ .r = 15, .g = 15, .b = 22, .a = 255 });
+                const sf_y = L.hdr_h + @divTrunc(L.pad, 2);
+                drawTextField(&search_field, L.pad, sf_y, sw - 2 * L.pad, L.fh,
+                    search_focused or search_field.len > 0, false);
+                if (search_field.len == 0) {
+                    rl.drawText("Search...", L.pad + 8, sf_y + @divTrunc(L.fh - L.fs_label, 2),
+                        L.fs_label, .gray);
+                }
 
                 // P2.2: "+" FAB button.
                 const fab_size = @divTrunc(sw, 7);
@@ -1228,16 +1374,16 @@ pub fn main() !void {
                         // Label.
                         drawSlice(edit_field_labels[fi], L.pad, fy + @divTrunc(L.detail_row_h - L.fs_label, 2), L.fs_label, .gray);
 
-                        // Value (masked for password when not focused or Android).
-                        const show_plain = fi != EDIT_PW_IDX or
-                            (!is_android and fi == edit_focus);
+                        // Value (masked for password unless shown).
+                        const is_pw_field = fi == EDIT_PW_IDX;
+                        const show_plain = !is_pw_field or
+                            (if (comptime is_android) edit_show_pw else fi == edit_focus);
+                        const val_y = fy + @divTrunc(L.detail_row_h - L.fs_body, 2);
                         if (show_plain) {
-                            const val_y = fy + @divTrunc(L.detail_row_h - L.fs_body, 2);
                             var dbuf: [max_field + 1:0]u8 = std.mem.zeroes([max_field + 1:0]u8);
                             const n = edit_fields[fi].len;
                             @memcpy(dbuf[0..n], edit_fields[fi].buf[0..n]);
                             rl.drawText(&dbuf, val_x, val_y, L.fs_body, .white);
-                            // Cursor for focused field on desktop.
                             if (is_focused) {
                                 const tw = rl.measureText(&dbuf, L.fs_body);
                                 rl.drawRectangle(val_x + tw, val_y, 2, L.fs_body, .sky_blue);
@@ -1247,12 +1393,22 @@ pub fn main() !void {
                             const n = @min(edit_fields[fi].len, 63);
                             @memset(stars[0..n], '*');
                             stars[n] = 0;
-                            rl.drawText(&stars, val_x, fy + @divTrunc(L.detail_row_h - L.fs_body, 2), L.fs_body, .white);
+                            rl.drawText(&stars, val_x, val_y, L.fs_body, .white);
                         }
 
-                        // Edit indicator (tap hint on Android).
+                        // 3.3: Show/Hide toggle on password row (Android).
                         if (comptime is_android) {
-                            rl.drawText(">", sw - L.pad - L.fs_body, fy + @divTrunc(L.detail_row_h - L.fs_body, 2), L.fs_body, .dark_gray);
+                            if (is_pw_field) {
+                                const toggle_w = @divTrunc(sw, 5);
+                                const toggle_h = @divTrunc(L.detail_row_h * 2, 3);
+                                const toggle_label: [:0]const u8 = if (edit_show_pw) "Hide" else "Show";
+                                drawButton(toggle_label,
+                                    sw - toggle_w - L.pad,
+                                    fy + @divTrunc(L.detail_row_h - toggle_h, 2),
+                                    toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                            } else {
+                                rl.drawText(">", sw - L.pad - L.fs_body, val_y, L.fs_body, .dark_gray);
+                            }
                         }
                     }
 
@@ -1299,15 +1455,19 @@ pub fn main() !void {
                 rl.drawText(subtitle, L.pad, sub_y, L.fs_label, .gray);
 
                 rl.drawText("Server IP", L.pad, ip_label_y, L.fs_label, .light_gray);
-                drawTextField(&ip_field, L.pad, ip_field_y, fw, L.fh, sync_focus_ip);
+                drawTextField(&ip_field, L.pad, ip_field_y, fw, L.fh, sync_focus_ip, sync_ip_err);
 
                 rl.drawText("Password", L.pad, pw_label_y, L.fs_label, .light_gray);
-                drawTextField(&sync_pw_field, L.pad, pw_field_y, fw, L.fh, !sync_focus_ip);
+                drawTextField(&sync_pw_field, L.pad, pw_field_y, fw, L.fh, !sync_focus_ip, sync_pw_err);
 
                 const submit_label: [:0]const u8 = if (first_use) "Fetch" else "Sync";
                 drawButton(submit_label, L.pad, submit_btn_y, fw, L.btn_h, .sky_blue);
 
-                if (!first_use) {
+                if (first_use) {
+                    // 3.7: Create new local database.
+                    drawButton("Create new (no server)", L.pad, del_btn_y, fw, L.btn_h,
+                        .{ .r = 50, .g = 100, .b = 60, .a = 255 });
+                } else {
                     if (delete_confirm_pending) {
                         // P1.3: show "Tap again to confirm" in bright red
                         drawButton("Tap again to confirm delete", L.pad, del_btn_y, fw, L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
@@ -1334,13 +1494,18 @@ pub fn main() !void {
             // ---- Sync running ------------------------------------------
             .sync_running => {
                 rl.drawText("Loki Sync", L.pad, L.pad * 2, L.fs_hdr, .white);
-                const status_text: [:0]const u8 = switch (g_status.load(.acquire)) {
-                    .connecting => "Connecting... (10s timeout)",
-                    .syncing => "Syncing...",
-                    else => "Please wait...",
+                // 3.1: animated dots — cycle every ~333ms.
+                const dot_count = @as(usize, @intCast(@mod(@as(i64, @intFromFloat(rl.getTime() * 3)), 4)));
+                const dots = [4][:0]const u8{ "", ".", "..", "..." };
+                var sbuf: [64:0]u8 = std.mem.zeroes([64:0]u8);
+                const base_label: [:0]const u8 = switch (g_status.load(.acquire)) {
+                    .connecting => "Connecting",
+                    .syncing => "Syncing",
+                    else => "Please wait",
                 };
-                const stw = rl.measureText(status_text, L.fs_body);
-                rl.drawText(status_text, @divTrunc(sw - stw, 2), @divTrunc(sh, 2), L.fs_body, .yellow);
+                _ = std.fmt.bufPrintZ(&sbuf, "{s}{s}", .{ base_label, dots[dot_count] }) catch {};
+                const stw = rl.measureText(&sbuf, L.fs_body);
+                rl.drawText(&sbuf, @divTrunc(sw - stw, 2), @divTrunc(sh, 2), L.fs_body, .yellow);
             },
 
             // ---- Sync result -------------------------------------------
@@ -1352,6 +1517,12 @@ pub fn main() !void {
                     .done => {
                         rl.drawText("Sync complete!", L.pad, result_y, L.fs_body, .green);
                         rl.drawText(&g_msg_buf, L.pad, result_y + L.fs_body + L.pad, L.fs_label, .green);
+                        // 3.5: explain conflict count.
+                        if (g_conflict_count > 0) {
+                            var cbuf: [128:0]u8 = std.mem.zeroes([128:0]u8);
+                            _ = std.fmt.bufPrintZ(&cbuf, "{d} conflict(s) — server version kept", .{g_conflict_count}) catch {};
+                            rl.drawText(&cbuf, L.pad, result_y + L.fs_body + L.pad + L.fs_label + L.pad, L.fs_label, .orange);
+                        }
                         drawButton("Open DB", L.pad, btn_y, sw - 2 * L.pad, L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
                     },
                     .failed => {
