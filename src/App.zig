@@ -302,11 +302,34 @@ fn subdirName(row_path: []const u8, parent_path: []const u8) ?[]const u8 {
 // ============================================================
 
 fn inputUnlock(self: *Self, c: Ctx) void {
-    if (comptime is_android) {
-        if (!self.unlock_dialog_shown) {
-            self.unlock_pw.showDialog("Enter password", true);
-            self.unlock_dialog_shown = true;
+    const fw = c.sw - 2 * c.L.pad;
+    const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
+
+    // Delete DB (two-tap confirmation) — only when a DB exists
+    if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, c.L.btn_h)) {
+        if (self.delete_confirm_pending) {
+            if (self.db) |*d| d.deinit();
+            self.db = null;
+            for (self.rows.items) |r| r.deinit(self.allocator);
+            self.rows.clearRetainingCapacity();
+            if (fs.deleteDb()) {
+                self.delete_db_err = null;
+                self.sync_err = null;
+                self.sync_from_browser = false;
+                self.phase = .sync_setup;
+                self.first_use = true;
+            } else {
+                self.delete_db_err = "Failed to delete database.";
+            }
+            self.delete_confirm_pending = false;
+        } else {
+            self.delete_confirm_pending = true;
+            self.delete_confirm_timer = 3.0;
         }
+        return;
+    }
+
+    if (comptime is_android) {
         var rbuf: [ui.max_field + 1]u8 = undefined;
         const poll = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
         if (poll > 0) {
@@ -327,11 +350,14 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             }
         } else if (poll < 0) {
             self.unlock_dialog_shown = false;
-            self.unlock_err = "Cancelled. Tap to retry.";
         } else if (c.is_tap and !self.unlock_dialog_shown) {
-            self.unlock_pw.showDialog("Enter password", true);
-            self.unlock_dialog_shown = true;
-            self.unlock_err = null;
+            const field_y = @divTrunc(c.sh * 2, 5);
+            const fw2 = c.sw - 2 * c.L.pad;
+            if (ui.inRect(c.mx, c.my, c.L.pad, field_y, fw2, c.L.fh)) {
+                self.unlock_pw.showDialog("Enter password", true);
+                self.unlock_dialog_shown = true;
+                self.unlock_err = null;
+            }
         }
     } else {
         if (rl.isKeyPressed(.backspace)) self.unlock_pw.pop();
@@ -836,7 +862,6 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
     const pw_field_y = pw_label_y + c.L.fs_label + 6;
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
-    const del_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
 
     if (self.sync_from_browser and c.is_tap and ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
         self.sync_from_browser = false;
@@ -883,30 +908,9 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
         }
     }
 
-    // Delete DB (two-tap confirmation, existing DB only)
-    if (!self.first_use and c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, c.L.btn_h)) {
-        if (self.delete_confirm_pending) {
-            if (self.db) |*d| d.deinit();
-            self.db = null;
-            for (self.rows.items) |r| r.deinit(self.allocator);
-            self.rows.clearRetainingCapacity();
-            if (fs.deleteDb()) {
-                self.first_use = true;
-                self.delete_db_err = null;
-                self.sync_err = null;
-                self.sync_from_browser = false;
-            } else {
-                self.delete_db_err = "Failed to delete database.";
-            }
-            self.delete_confirm_pending = false;
-        } else {
-            self.delete_confirm_pending = true;
-            self.delete_confirm_timer = 3.0;
-        }
-    }
-
     // Create new local DB (first use only)
-    if (self.first_use and c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, c.L.btn_h)) {
+    const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
+    if (self.first_use and c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, create_btn_y, fw, c.L.btn_h)) {
         create_db: {
             if (self.sync_pw_field.len == 0) {
                 self.sync_pw_err = true;
@@ -1044,7 +1048,18 @@ fn drawUnlock(self: *Self, c: Ctx) void {
     if (comptime !is_android) {
         const btn_y = @divTrunc(c.sh * 3, 5);
         ui.drawButton("Open", c.L.pad, btn_y, fw, c.L.btn_h, .{ .r = 30, .g = 140, .b = 200, .a = 255 });
-        rl.drawText("Enter: open", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("Enter: open", c.L.pad, c.sh - c.L.fs_small * 2 - c.L.pad * 2, c.L.fs_small, .dark_gray);
+    }
+
+    // Delete DB button at bottom
+    const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
+    if (self.delete_confirm_pending) {
+        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+    } else {
+        ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
+    }
+    if (self.delete_db_err) |msg| {
+        rl.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
     }
 }
 
@@ -1400,7 +1415,7 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
     const pw_field_y = pw_label_y + c.L.fs_label + 6;
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
-    const del_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
+    const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
 
     rl.drawText("Loki Sync", c.L.pad, title_y, c.L.fs_hdr, .white);
 
@@ -1420,18 +1435,11 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     ui.drawButton(submit_label, c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);
 
     if (self.first_use) {
-        ui.drawButton("Create new (no server)", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
-    } else {
-        if (self.delete_confirm_pending) {
-            ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
-        } else {
-            ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 180, .g = 40, .b = 40, .a = 255 });
-        }
+        ui.drawButton("Create new (no server)", c.L.pad, create_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
     }
 
-    const err_y = del_btn_y + c.L.btn_h + c.L.pad;
+    const err_y = create_btn_y + c.L.btn_h + c.L.pad;
     if (self.sync_err) |msg| rl.drawText(msg, c.L.pad, err_y, c.L.fs_label, .orange);
-    if (self.delete_db_err) |msg| rl.drawText(msg, c.L.pad, err_y + c.L.fs_label + 4, c.L.fs_label, .red);
 
     if (comptime !is_android) {
         rl.drawText("Tab: switch field   Enter: submit", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
