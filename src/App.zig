@@ -430,10 +430,16 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             } else if (subdirName(row.path, cur_path)) |dn| {
                 var already = false;
                 for (seen_dirs[0..seen_dirs_len]) |s| {
-                    if (std.mem.eql(u8, s, dn)) { already = true; break; }
+                    if (std.mem.eql(u8, s, dn)) {
+                        already = true;
+                        break;
+                    }
                 }
                 if (!already) {
-                    if (seen_dirs_len < 256) { seen_dirs[seen_dirs_len] = dn; seen_dirs_len += 1; }
+                    if (seen_dirs_len < 256) {
+                        seen_dirs[seen_dirs_len] = dn;
+                        seen_dirs_len += 1;
+                    }
                     row_count += 1;
                 }
             }
@@ -444,24 +450,24 @@ fn inputBrowser(self: *Self, c: Ctx) void {
     self.browser_scroll = std.math.clamp(self.browser_scroll, 0, @max(0, content_h - visible_h));
 
     if (c.is_tap) {
-        const hdr_btn_h = @divTrunc(c.L.btn_h, 2);
-        const hdr_btn_y = @divTrunc(c.L.hdr_h - hdr_btn_h, 2);
-        const sync_btn_w = @divTrunc(c.sw, 5);
-        const sync_btn_x = c.sw - sync_btn_w - c.L.pad;
-        const lock_btn_w = @divTrunc(c.sw, 6);
-        const lock_btn_x = sync_btn_x - lock_btn_w - c.L.pad;
         const fab_size = @divTrunc(c.sw, 7);
         const fab_x = c.sw - fab_size - c.L.pad;
         const fab_y = c.sh - fab_size - c.L.pad;
+        const bot_btn_h = fab_size;
+        const bot_btn_y = fab_y;
+        const lock_btn_w = @divTrunc(c.sw, 4);
+        const lock_btn_x = c.L.pad;
+        const sync_btn_w = @divTrunc(c.sw, 4);
+        const sync_btn_x = lock_btn_x + lock_btn_w + c.L.pad;
 
-        if (ui.inRect(c.mx, c.my, sync_btn_x, hdr_btn_y, sync_btn_w, hdr_btn_h)) {
+        if (ui.inRect(c.mx, c.my, sync_btn_x, bot_btn_y, sync_btn_w, bot_btn_h)) {
             self.first_use = false;
             self.delete_db_err = null;
             self.sync_err = null;
             self.sync_from_browser = true;
             self.delete_confirm_pending = false;
             self.phase = .sync_setup;
-        } else if (ui.inRect(c.mx, c.my, lock_btn_x, hdr_btn_y, lock_btn_w, hdr_btn_h)) {
+        } else if (ui.inRect(c.mx, c.my, lock_btn_x, bot_btn_y, lock_btn_w, bot_btn_h)) {
             if (self.db) |*d| d.deinit();
             self.db = null;
             for (self.rows.items) |r| r.deinit(self.allocator);
@@ -522,10 +528,16 @@ fn inputBrowser(self: *Self, c: Ctx) void {
                         if (subdirName(row.path, cur_path)) |dn| {
                             var already = false;
                             for (seen_dirs2[0..seen_dirs2_len]) |s| {
-                                if (std.mem.eql(u8, s, dn)) { already = true; break; }
+                                if (std.mem.eql(u8, s, dn)) {
+                                    already = true;
+                                    break;
+                                }
                             }
                             if (!already) {
-                                if (seen_dirs2_len < 256) { seen_dirs2[seen_dirs2_len] = dn; seen_dirs2_len += 1; }
+                                if (seen_dirs2_len < 256) {
+                                    seen_dirs2[seen_dirs2_len] = dn;
+                                    seen_dirs2_len += 1;
+                                }
                                 if (visible_i == idx_i) {
                                     self.navigateInto(dn);
                                     handled = true;
@@ -1035,10 +1047,16 @@ fn drawBrowser(self: *Self, c: Ctx) void {
             const dn = subdirName(row.path, cur_path) orelse continue;
             var already = false;
             for (seen_dirs[0..seen_dirs_len]) |s| {
-                if (std.mem.eql(u8, s, dn)) { already = true; break; }
+                if (std.mem.eql(u8, s, dn)) {
+                    already = true;
+                    break;
+                }
             }
             if (already) continue;
-            if (seen_dirs_len < 256) { seen_dirs[seen_dirs_len] = dn; seen_dirs_len += 1; }
+            if (seen_dirs_len < 256) {
+                seen_dirs[seen_dirs_len] = dn;
+                seen_dirs_len += 1;
+            }
 
             any_visible = true;
             const row_y = list_top + draw_idx * c.L.row_h -
@@ -1087,13 +1105,6 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     // Header (drawn last so it covers scrolled content)
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
 
-    const hdr_btn_h = @divTrunc(c.L.btn_h, 2);
-    const hdr_btn_y = @divTrunc(c.L.hdr_h - hdr_btn_h, 2);
-    const sync_btn_w = @divTrunc(c.sw, 5);
-    const sync_btn_x = c.sw - sync_btn_w - c.L.pad;
-    const lock_btn_w = @divTrunc(c.sw, 6);
-    const lock_btn_x = sync_btn_x - lock_btn_w - c.L.pad;
-
     if (!is_searching and self.browser_path_len > 0) {
         // In a subdirectory: show "< Back" and current dir name
         rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
@@ -1109,9 +1120,6 @@ fn drawBrowser(self: *Self, c: Ctx) void {
         rl.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
     }
 
-    ui.drawButton("Sync", sync_btn_x, hdr_btn_y, sync_btn_w, hdr_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
-    ui.drawButton("Lock", lock_btn_x, hdr_btn_y, lock_btn_w, hdr_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
-
     // Search bar
     rl.drawRectangle(0, c.L.hdr_h, c.sw, search_bar_h, .{ .r = 15, .g = 15, .b = 22, .a = 255 });
     const sf_y = c.L.hdr_h + @divTrunc(c.L.pad, 2);
@@ -1120,10 +1128,14 @@ fn drawBrowser(self: *Self, c: Ctx) void {
         rl.drawText("Search...", c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
     }
 
-    // "+" FAB
+    // Bottom bar: Lock + Sync (left), "+" FAB (right)
     const fab_size = @divTrunc(c.sw, 7);
     const fab_x = c.sw - fab_size - c.L.pad;
     const fab_y = c.sh - fab_size - c.L.pad;
+    const lock_btn_w = @divTrunc(c.sw, 4);
+    const sync_btn_w = @divTrunc(c.sw, 4);
+    ui.drawButton("Lock", c.L.pad, fab_y, lock_btn_w, fab_size, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+    ui.drawButton("Sync", c.L.pad + lock_btn_w + c.L.pad, fab_y, sync_btn_w, fab_size, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
     ui.drawButton("+", fab_x, fab_y, fab_size, fab_size, .{ .r = 0, .g = 135, .b = 190, .a = 255 });
 }
 
