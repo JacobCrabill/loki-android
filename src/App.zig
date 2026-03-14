@@ -30,105 +30,73 @@ const OpenError = error{ StorageError, WrongPassword, OpenFailed, OutOfMemory };
 // ---- State ----
 
 allocator: std.mem.Allocator,
-phase: ui.Phase,
-drag_accum: f32,
+phase: ui.Phase = .unlock,
+drag_accum: f32 = 0,
 
 // Unlock
-unlock_pw: ui.TextField,
-unlock_err: ?[:0]const u8,
-unlock_dialog_shown: bool,
+unlock_pw: ui.TextField = .{ .masked = true },
+unlock_err: ?[:0]const u8 = null,
+unlock_dialog_shown: bool = false,
 
 // DB + browser
-db: ?loki.Database,
-rows: std.ArrayListUnmanaged(ui.BrowserRow),
-browser_scroll: f32,
+db: ?loki.Database = null,
+rows: std.ArrayListUnmanaged(ui.BrowserRow) = .{},
+browser_scroll: f32 = 0,
 
 // Detail
-detail_entry: ?loki.Entry,
-detail_entry_id: [20]u8,
-detail_head_hash: [20]u8,
-detail_show_pw: bool,
-detail_scroll: f32,
-detail_delete_confirm_pending: bool,
-detail_delete_confirm_timer: f32,
+detail_entry: ?loki.Entry = null,
+detail_entry_id: [20]u8 = undefined,
+detail_head_hash: [20]u8 = undefined,
+detail_show_pw: bool = false,
+detail_scroll: f32 = 0,
+detail_delete_confirm_pending: bool = false,
+detail_delete_confirm_timer: f32 = 0,
 
 // Edit
-edit_fields: [7]ui.TextField,
-edit_pending: ?usize,
-edit_err: ?[:0]const u8,
-edit_focus: usize,
-edit_scroll: f32,
-edit_is_new: bool,
-edit_show_pw: bool,
+edit_fields: [7]ui.TextField = defaultEditFields(),
+edit_pending: ?usize = null,
+edit_err: ?[:0]const u8 = null,
+edit_focus: usize = 0,
+edit_scroll: f32 = 0,
+edit_is_new: bool = false,
+edit_show_pw: bool = false,
 
 // Sync setup
-ip_field: ui.TextField,
-sync_pw_field: ui.TextField,
-sync_focus_ip: bool,
-sync_err: ?[:0]const u8,
-sync_pending_field: ?bool,
-first_use: bool,
-delete_db_err: ?[:0]const u8,
-sync_from_browser: bool,
-delete_confirm_pending: bool,
-delete_confirm_timer: f32,
-sync_ip_err: bool,
-sync_pw_err: bool,
+ip_field: ui.TextField = .{},
+sync_pw_field: ui.TextField = .{ .masked = true },
+sync_focus_ip: bool = true,
+sync_err: ?[:0]const u8 = null,
+sync_pending_field: ?bool = null,
+first_use: bool = false,
+delete_db_err: ?[:0]const u8 = null,
+sync_from_browser: bool = false,
+delete_confirm_pending: bool = false,
+delete_confirm_timer: f32 = 0,
+sync_ip_err: bool = false,
+sync_pw_err: bool = false,
 
 // Search
-search_field: ui.TextField,
-search_pending: bool,
-search_focused: bool,
+search_field: ui.TextField = .{},
+search_pending: bool = false,
+search_focused: bool = false,
 
 // Clipboard toast
-copy_feedback_timer: f32,
+copy_feedback_timer: f32 = 0,
+
+// ---- Helpers for field defaults ----
+
+fn defaultEditFields() [7]ui.TextField {
+    var arr: [7]ui.TextField = undefined;
+    for (0..7) |i| arr[i] = .{ .masked = i == ui.EDIT_PW_IDX };
+    return arr;
+}
 
 // ---- Lifecycle ----
 
 pub fn init(allocator: std.mem.Allocator) Self {
-    const initial_phase: ui.Phase = if (fs.dbDirExists()) .unlock else .sync_setup;
-    var self = Self{
-        .allocator = allocator,
-        .phase = initial_phase,
-        .drag_accum = 0,
-        .unlock_pw = .{ .masked = true },
-        .unlock_err = null,
-        .unlock_dialog_shown = false,
-        .db = null,
-        .rows = .{},
-        .browser_scroll = 0,
-        .detail_entry = null,
-        .detail_entry_id = undefined,
-        .detail_head_hash = undefined,
-        .detail_show_pw = false,
-        .detail_scroll = 0,
-        .detail_delete_confirm_pending = false,
-        .detail_delete_confirm_timer = 0,
-        .edit_fields = undefined,
-        .edit_pending = null,
-        .edit_err = null,
-        .edit_focus = 0,
-        .edit_scroll = 0,
-        .edit_is_new = false,
-        .edit_show_pw = false,
-        .ip_field = .{},
-        .sync_pw_field = .{ .masked = true },
-        .sync_focus_ip = true,
-        .sync_err = null,
-        .sync_pending_field = null,
-        .first_use = (initial_phase == .sync_setup),
-        .delete_db_err = null,
-        .sync_from_browser = false,
-        .delete_confirm_pending = false,
-        .delete_confirm_timer = 0,
-        .sync_ip_err = false,
-        .sync_pw_err = false,
-        .search_field = .{},
-        .search_pending = false,
-        .search_focused = false,
-        .copy_feedback_timer = 0,
-    };
-    for (0..7) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.EDIT_PW_IDX };
+    var self = Self{ .allocator = allocator };
+    self.phase = if (fs.dbDirExists()) .unlock else .sync_setup;
+    self.first_use = (self.phase == .sync_setup);
     self.ip_field.setDefault("192.168.1.100");
     load_prefs: {
         var base = fs.openBaseDir() catch break :load_prefs;
@@ -352,11 +320,21 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.search_focused = false;
         }
         if (self.search_focused) {
-            if (rl.isKeyPressed(.backspace)) { self.search_field.pop(); self.browser_scroll = 0; }
-            if (rl.isKeyPressed(.escape)) { self.search_field = .{}; self.search_focused = false; self.browser_scroll = 0; }
+            if (rl.isKeyPressed(.backspace)) {
+                self.search_field.pop();
+                self.browser_scroll = 0;
+            }
+            if (rl.isKeyPressed(.escape)) {
+                self.search_field = .{};
+                self.search_focused = false;
+                self.browser_scroll = 0;
+            }
             var ch = rl.getCharPressed();
             while (ch != 0) : (ch = rl.getCharPressed()) {
-                if (ch >= 32 and ch < 127) { self.search_field.append(@intCast(ch)); self.browser_scroll = 0; }
+                if (ch >= 32 and ch < 127) {
+                    self.search_field.append(@intCast(ch));
+                    self.browser_scroll = 0;
+                }
             }
         }
     }
@@ -585,60 +563,58 @@ fn inputEdit(self: *Self, c: Ctx) void {
 }
 
 fn doSave(self: *Self) void {
-    save: {
-        const d = if (self.db) |*d_| d_ else {
-            self.edit_err = "No database.";
-            break :save;
+    const d = if (self.db) |*d_| d_ else {
+        self.edit_err = "No database.";
+        return;
+    };
+    const new_entry = loki.Entry{
+        .parent_hash = if (self.edit_is_new) null else self.detail_head_hash,
+        .title = self.edit_fields[0].slice(),
+        .path = self.edit_fields[1].slice(),
+        .description = self.edit_fields[2].slice(),
+        .url = self.edit_fields[3].slice(),
+        .username = self.edit_fields[4].slice(),
+        .password = self.edit_fields[5].slice(),
+        .notes = self.edit_fields[6].slice(),
+    };
+    if (self.edit_is_new) {
+        _ = d.createEntry(new_entry) catch {
+            self.edit_err = "Save failed.";
+            return;
         };
-        const new_entry = loki.Entry{
-            .parent_hash = if (self.edit_is_new) null else self.detail_head_hash,
-            .title = self.edit_fields[0].slice(),
-            .path = self.edit_fields[1].slice(),
-            .description = self.edit_fields[2].slice(),
-            .url = self.edit_fields[3].slice(),
-            .username = self.edit_fields[4].slice(),
-            .password = self.edit_fields[5].slice(),
-            .notes = self.edit_fields[6].slice(),
+        d.save() catch {
+            self.edit_err = "Save failed.";
+            return;
         };
-        if (self.edit_is_new) {
-            _ = d.createEntry(new_entry) catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            d.save() catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            self.repopulateRows(d) catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            self.browser_scroll = 0;
-            self.phase = .browser;
-        } else {
-            _ = d.updateEntry(self.detail_entry_id, new_entry) catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            d.save() catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            self.repopulateRows(d) catch {
-                self.edit_err = "Save failed.";
-                break :save;
-            };
-            // P2.5: return to detail with refreshed data.
-            if (self.detail_entry) |e| e.deinit(self.allocator);
-            self.detail_entry = d.getEntry(self.detail_entry_id) catch null;
-            for (self.rows.items) |r| {
-                if (std.mem.eql(u8, &r.entry_id, &self.detail_entry_id)) {
-                    self.detail_head_hash = r.head_hash;
-                    break;
-                }
+        self.repopulateRows(d) catch {
+            self.edit_err = "Save failed.";
+            return;
+        };
+        self.browser_scroll = 0;
+        self.phase = .browser;
+    } else {
+        _ = d.updateEntry(self.detail_entry_id, new_entry) catch {
+            self.edit_err = "Save failed.";
+            return;
+        };
+        d.save() catch {
+            self.edit_err = "Save failed.";
+            return;
+        };
+        self.repopulateRows(d) catch {
+            self.edit_err = "Save failed.";
+            return;
+        };
+        // P2.5: return to detail with refreshed data.
+        if (self.detail_entry) |e| e.deinit(self.allocator);
+        self.detail_entry = d.getEntry(self.detail_entry_id) catch null;
+        for (self.rows.items) |r| {
+            if (std.mem.eql(u8, &r.entry_id, &self.detail_entry_id)) {
+                self.detail_head_hash = r.head_hash;
+                break;
             }
-            self.phase = .detail;
         }
+        self.phase = .detail;
     }
 }
 
@@ -735,7 +711,10 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
             };
             defer if (comptime is_android) base.close();
             const created = loki.Database.create(
-                self.allocator, base, fs.db_name, self.sync_pw_field.slice(),
+                self.allocator,
+                base,
+                fs.db_name,
+                self.sync_pw_field.slice(),
             ) catch {
                 self.sync_err = "Failed to create database.";
                 break :create_db;
@@ -914,8 +893,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     // Search bar
     rl.drawRectangle(0, c.L.hdr_h, c.sw, search_bar_h, .{ .r = 15, .g = 15, .b = 22, .a = 255 });
     const sf_y = c.L.hdr_h + @divTrunc(c.L.pad, 2);
-    ui.drawTextField(&self.search_field, c.L.pad, sf_y, c.sw - 2 * c.L.pad, c.L.fh,
-        self.search_focused or self.search_field.len > 0, false);
+    ui.drawTextField(&self.search_field, c.L.pad, sf_y, c.sw - 2 * c.L.pad, c.L.fh, self.search_focused or self.search_field.len > 0, false);
     if (self.search_field.len == 0) {
         rl.drawText("Search...", c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
     }
@@ -939,13 +917,13 @@ fn drawDetail(self: *Self, c: Ctx) void {
 
     const Field = struct { label: []const u8, value: []const u8 };
     const fields = [_]Field{
-        .{ .label = "Title",    .value = entry.title },
-        .{ .label = "Path",     .value = entry.path },
-        .{ .label = "Desc",     .value = entry.description },
-        .{ .label = "URL",      .value = entry.url },
+        .{ .label = "Title", .value = entry.title },
+        .{ .label = "Path", .value = entry.path },
+        .{ .label = "Desc", .value = entry.description },
+        .{ .label = "URL", .value = entry.url },
         .{ .label = "Username", .value = entry.username },
         .{ .label = "Password", .value = entry.password },
-        .{ .label = "Notes",    .value = entry.notes },
+        .{ .label = "Notes", .value = entry.notes },
     };
 
     for (fields, 0..) |f, fi| {
@@ -978,10 +956,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
         if (is_pw) {
             const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
             const toggle_label: [:0]const u8 = if (self.detail_show_pw) "Hide" else "Show";
-            ui.drawButton(toggle_label,
-                c.sw - toggle_w - c.L.pad,
-                fy + @divTrunc(c.L.detail_row_h - toggle_h, 2),
-                toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+            ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
         }
 
         rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
@@ -991,11 +966,9 @@ fn drawDetail(self: *Self, c: Ctx) void {
     const del_btn_h = c.L.btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
     if (self.detail_delete_confirm_pending) {
-        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h,
-            .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
-        ui.drawButton("Delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h,
-            .{ .r = 160, .g = 40, .b = 40, .a = 255 });
+        ui.drawButton("Delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
     }
 
     // "Copied!" toast
@@ -1012,8 +985,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
     }
 
     if (comptime !is_android) {
-        rl.drawText("h: pw  Esc: back", c.L.pad,
-            c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("h: pw  Esc: back", c.L.pad, c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Header (drawn last)
@@ -1041,8 +1013,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
         rl.drawRectangle(0, fy, c.sw, c.L.detail_row_h, bg);
 
         if (fy >= c.L.hdr_h) {
-            ui.drawSlice(ui.edit_field_labels[fi], c.L.pad,
-                fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
+            ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
             const is_pw_field = fi == ui.EDIT_PW_IDX;
             const show_plain = !is_pw_field or
@@ -1071,10 +1042,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     const toggle_w = @divTrunc(c.sw, 5);
                     const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
                     const toggle_label: [:0]const u8 = if (self.edit_show_pw) "Hide" else "Show";
-                    ui.drawButton(toggle_label,
-                        c.sw - toggle_w - c.L.pad,
-                        fy + @divTrunc(c.L.detail_row_h - toggle_h, 2),
-                        toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                    ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
                 } else {
                     rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
                 }
@@ -1093,14 +1061,10 @@ fn drawEdit(self: *Self, c: Ctx) void {
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
     rl.drawText("Cancel", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     const save_tw = rl.measureText("Save", c.L.fs_body);
-    rl.drawText("Save",
-        c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2),
-        @divTrunc(c.L.hdr_h - c.L.fs_body, 2),
-        c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
+    rl.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
 
     if (comptime !is_android) {
-        rl.drawText("Tab: next field   Enter: save   Esc: cancel",
-            c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("Tab: next field   Enter: save   Esc: cancel", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 }
 
@@ -1134,15 +1098,12 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     ui.drawButton(submit_label, c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);
 
     if (self.first_use) {
-        ui.drawButton("Create new (no server)", c.L.pad, del_btn_y, fw, c.L.btn_h,
-            .{ .r = 50, .g = 100, .b = 60, .a = 255 });
+        ui.drawButton("Create new (no server)", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
     } else {
         if (self.delete_confirm_pending) {
-            ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h,
-                .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+            ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
         } else {
-            ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h,
-                .{ .r = 180, .g = 40, .b = 40, .a = 255 });
+            ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 180, .g = 40, .b = 40, .a = 255 });
         }
     }
 
@@ -1151,8 +1112,7 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     if (self.delete_db_err) |msg| rl.drawText(msg, c.L.pad, err_y + c.L.fs_label + 4, c.L.fs_label, .red);
 
     if (comptime !is_android) {
-        rl.drawText("Tab: switch field   Enter: submit",
-            c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("Tab: switch field   Enter: submit", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Back button in header when reached from browser
@@ -1188,20 +1148,16 @@ fn drawSyncResult(_: *Self, c: Ctx) void {
             if (sync.g_conflict_count > 0) {
                 var cbuf: [128:0]u8 = std.mem.zeroes([128:0]u8);
                 _ = std.fmt.bufPrintZ(&cbuf, "{d} conflict(s) — server version kept", .{sync.g_conflict_count}) catch {};
-                rl.drawText(&cbuf, c.L.pad,
-                    result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad, c.L.fs_label, .orange);
+                rl.drawText(&cbuf, c.L.pad, result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad, c.L.fs_label, .orange);
             }
-            ui.drawButton("Open DB", c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h,
-                .{ .r = 30, .g = 140, .b = 80, .a = 255 });
+            ui.drawButton("Open DB", c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
         },
         .failed => {
             rl.drawText("Sync failed:", c.L.pad, result_y, c.L.fs_body, .red);
             rl.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .red);
             const half_w = @divTrunc(c.sw - 3 * c.L.pad, 2);
-            ui.drawButton("Back", c.L.pad, btn_y, half_w, c.L.btn_h,
-                .{ .r = 70, .g = 70, .b = 90, .a = 255 });
-            ui.drawButton("Retry", 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h,
-                .{ .r = 30, .g = 130, .b = 180, .a = 255 });
+            ui.drawButton("Back", c.L.pad, btn_y, half_w, c.L.btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+            ui.drawButton("Retry", 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
         },
         else => {},
     }
