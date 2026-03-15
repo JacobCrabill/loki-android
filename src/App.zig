@@ -1519,7 +1519,10 @@ fn drawSyncResult(_: *Self, c: Ctx) void {
             if (sync.g_conflict_count > 0) {
                 var cbuf: [128:0]u8 = std.mem.zeroes([128:0]u8);
                 _ = std.fmt.bufPrintZ(&cbuf, "{d} conflict(s) — server version kept", .{sync.g_conflict_count}) catch {};
-                rl.drawText(&cbuf, c.L.pad, result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad, c.L.fs_label, .orange);
+                const conflict_y = result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad;
+                rl.drawText(&cbuf, c.L.pad, conflict_y, c.L.fs_label, .orange);
+                rl.drawText("Use the desktop TUI to review", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2), c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
+                rl.drawText("and resolve conflicts.", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2) + c.L.fs_small + 4, c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
             }
             ui.drawButton("Open DB", c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
         },
