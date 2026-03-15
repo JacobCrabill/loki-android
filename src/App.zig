@@ -85,6 +85,9 @@ search_focused: bool = false,
 // Clipboard toast
 copy_feedback_timer: f32 = 0,
 
+// Auto-lock
+last_interaction_time: f64 = 0,
+
 // Current directory path in the hierarchical browser
 browser_path_buf: [ui.max_field]u8 = std.mem.zeroes([ui.max_field]u8),
 browser_path_len: usize = 0,
@@ -121,6 +124,21 @@ pub fn deinit(self: *Self) void {
     if (self.db) |*d| d.deinit();
 }
 
+fn lock(self: *Self) void {
+    if (self.detail_entry) |e| e.deinit(self.allocator);
+    self.detail_entry = null;
+    for (self.rows.items) |r| r.deinit(self.allocator);
+    self.rows.clearRetainingCapacity();
+    if (self.db) |*d| d.deinit();
+    self.db = null;
+    self.unlock_pw = .{ .masked = true };
+    self.unlock_err = null;
+    self.unlock_dialog_shown = false;
+    self.browser_path_len = 0;
+    self.browser_scroll = 0;
+    self.phase = .unlock;
+}
+
 // ---- Main per-frame update ----
 
 pub fn update(self: *Self) void {
@@ -137,6 +155,24 @@ pub fn update(self: *Self) void {
     const is_tap = rl.isMouseButtonReleased(.left) and self.drag_accum < 10;
 
     const c = Ctx{ .sw = sw, .sh = sh, .L = L, .mx = mx, .my = my, .is_tap = is_tap };
+
+    // Track last user interaction for auto-lock
+    const now = rl.getTime();
+    if (rl.isMouseButtonPressed(.left) or rl.isMouseButtonDown(.left) or
+        rl.isMouseButtonReleased(.left) or rl.getKeyPressed() != .null)
+    {
+        self.last_interaction_time = now;
+    }
+    if (self.last_interaction_time == 0) self.last_interaction_time = now;
+
+    // Auto-lock after 5 minutes of inactivity when DB is open
+    const unlocked = switch (self.phase) {
+        .browser, .detail, .edit => true,
+        else => false,
+    };
+    if (unlocked and self.db != null and now - self.last_interaction_time > 300.0) {
+        self.lock();
+    }
 
     // Tick timers
     if (self.delete_confirm_pending) {
