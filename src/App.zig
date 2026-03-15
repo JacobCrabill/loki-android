@@ -817,7 +817,9 @@ fn inputEdit(self: *Self, c: Ctx) void {
     }
     const notes_content_h: f32 = @floatFromInt(notes_line_count * notes_line_spacing);
     self.edit_notes_scroll = std.math.clamp(
-        self.edit_notes_scroll, 0, @max(0, notes_content_h - @as(f32, @floatFromInt(notes_visible_h))),
+        self.edit_notes_scroll,
+        0,
+        @max(0, notes_content_h - @as(f32, @floatFromInt(notes_visible_h))),
     );
 
     // Cancel / Save (both platforms)
@@ -1261,6 +1263,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
     };
 
     for (fields, 0..) |f, fi| {
+        const is_notes = fi == fields.len - 1;
         const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
         if (fy + c.L.detail_row_h < c.L.hdr_h or fy > c.sh) continue;
 
@@ -1268,7 +1271,8 @@ fn drawDetail(self: *Self, c: Ctx) void {
             .{ .r = 18, .g = 18, .b = 28, .a = 255 }
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-        rl.drawRectangle(0, fy, c.sw, c.L.detail_row_h, bg);
+        const draw_h = if (is_notes) @max(c.L.detail_row_h, c.sh - fy) else c.L.detail_row_h;
+        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
 
         ui.drawSlice(f.label, c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
@@ -1293,7 +1297,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
             ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
         }
 
-        rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+        if (!is_notes) rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
     }
 
     // Delete button (pinned bottom)
@@ -1346,7 +1350,8 @@ fn drawEdit(self: *Self, c: Ctx) void {
             .{ .r = 18, .g = 18, .b = 28, .a = 255 }
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-        rl.drawRectangle(0, fy, c.sw, row_h, bg);
+        const draw_h = if (fi == ui.EDIT_NOTES_IDX) @max(row_h, c.sh - fy) else row_h;
+        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
 
         if (fy >= c.L.hdr_h) {
             if (fi == ui.EDIT_NOTES_IDX) {
