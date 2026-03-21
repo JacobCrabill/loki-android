@@ -18,7 +18,7 @@ for the changes you can make locally to your std lib to fix the error.
 
 ```sh
 zig build run           # Native
-zig build run -Dandroid # Android
+zig build run -Dandroid # Android - Also installs & runs the app
 ```
 
 ### Build, install to test one target against a local emulator and run
@@ -73,7 +73,7 @@ adb logcat --pid=`adb shell pidof -s com.zig.loki`
 - Install the JAVA SDK from <https://www.oracle.com/java/technologies/downloads/>
   - I used the `.tar.gz` and unpacked it to `~/.local/apps/jdk-24.0.2`
 - Install the android [cmdline-tools](https://developer.android.com/studio#command-line-tools-only)
-  to `~/.local/apps/android-sdk/cmdline-tools/latest/`
+  (use the non-Android Studio tarball option) to `~/.local/apps/android-sdk/cmdline-tools/latest/`
 
 ```bash
 export JDK_HOME=${HOME}/.local/apps/jdk-25.0.2
