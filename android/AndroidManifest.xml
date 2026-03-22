@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <application
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/loki-logo"
         android:label="@string/app_name"
         android:hasCode="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
