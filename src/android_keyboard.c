@@ -212,6 +212,8 @@ int pollTextInputDialog(char *out_buf, int buf_size) {
 static atomic_int g_back_pressed = 0;
 static int        g_back_registered = 0;
 
+static JNIEnv *attach(int *out_detach);  // defined below
+
 // Called by MainActivity.onBackPressed() on the UI thread.
 static void on_back_pressed(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;

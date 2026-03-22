@@ -77,7 +77,8 @@ const OpenError = error{ StorageError, WrongPassword, OpenFailed, OutOfMemory };
 
 allocator: std.mem.Allocator,
 phase: ui.Phase = .unlock,
-drag_accum: f32 = 0,
+press_x: f32 = 0,
+press_y: f32 = 0,
 
 // Unlock
 unlock_pw: ui.TextField = .{ .masked = true },
@@ -260,12 +261,12 @@ pub fn update(self: *Self) void {
     const mx = mouse.x;
     const my = mouse.y;
 
-    if (rl.isMouseButtonPressed(.left)) self.drag_accum = 0;
-    if (rl.isMouseButtonDown(.left)) {
-        const d = rl.getMouseDelta();
-        self.drag_accum += @abs(d.x) + @abs(d.y);
+    if (rl.isMouseButtonPressed(.left)) {
+        self.press_x = mx;
+        self.press_y = my;
     }
-    const is_tap = rl.isMouseButtonReleased(.left) and self.drag_accum < 10;
+    const tap_displacement = @abs(mx - self.press_x) + @abs(my - self.press_y);
+    const is_tap = rl.isMouseButtonReleased(.left) and tap_displacement < 10;
 
     const c = Ctx{
         .sw = sw,
@@ -422,13 +423,12 @@ fn browserPath(self: *const Self) []const u8 {
 
 /// Append `dir_name` to the current path (e.g. "Home" + "Banking" → "Home/Banking").
 fn navigateInto(self: *Self, dir_name: []const u8) void {
-    const cur = self.browserPath();
-    var new_len: usize = 0;
-    if (cur.len > 0) {
-        const n = @min(cur.len, ui.max_field - 1);
-        @memcpy(self.browser_path_buf[0..n], cur[0..n]);
-        self.browser_path_buf[n] = '/';
-        new_len = n + 1;
+    // browser_path_buf already holds the current path in-place; we only need
+    // to append '/' + dir_name.  Copying cur back over itself would alias.
+    var new_len: usize = self.browser_path_len;
+    if (new_len > 0 and new_len < ui.max_field) {
+        self.browser_path_buf[new_len] = '/';
+        new_len += 1;
     }
     const remaining = ui.max_field - new_len;
     const dn = @min(dir_name.len, remaining);
@@ -632,6 +632,12 @@ fn inputBrowser(self: *Self, c: Ctx) void {
         self.browser_scroll -= rl.getMouseDelta().y;
     }
     self.browser_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.row_h));
+
+    // Back gesture navigates up a directory level when inside a subdirectory.
+    if (c.back and self.browser_path_len > 0) {
+        self.navigateUp();
+        return;
+    }
 
     // Poll biometric enroll result (enroll fires after a successful password unlock
     // while the user is already in the browser view).
