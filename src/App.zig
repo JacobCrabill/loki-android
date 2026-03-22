@@ -1010,18 +1010,8 @@ fn inputHistory(self: *Self, c: Ctx) void {
     if (c.is_tap) {
         const hdr_btn_w = @divTrunc(c.sw, 4);
         const btn_h = c.L.btn_h;
-        // Bottom button bar layout:
-        //   [Prev]  [Copy to new entry]  [Next]   — above footer
-        //   [Back to latest]                       — footer row
-        const footer_y = c.sh - btn_h - c.L.pad;
-        const bar_y = footer_y - btn_h - @divTrunc(c.L.pad, 2);
+        const bar_y = c.sh - btn_h - c.L.pad;
         const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
-
-        // "Back" button (bottom row) — return to latest version in detail view.
-        if (ui.inRect(c.mx, c.my, c.L.pad, footer_y, c.sw - 2 * c.L.pad, btn_h)) {
-            self.phase = .detail;
-            return;
-        }
 
         // "Prev" button — go to an older version (higher index).
         const prev_x = c.L.pad;
@@ -2000,10 +1990,9 @@ fn drawHistory(self: *Self, c: Ctx) void {
     const val_x = c.L.label_w + c.L.pad;
     const toggle_w = @divTrunc(c.sw, 5);
 
-    // Bottom button layout.
+    // Bottom button bar.
     const btn_h = c.L.btn_h;
-    const footer_y = c.sh - btn_h - c.L.pad;
-    const bar_y = footer_y - btn_h - @divTrunc(c.L.pad, 2);
+    const bar_y = c.sh - btn_h - c.L.pad;
 
     // Draw fields (same style as drawDetail).
     const Field = struct { label: []const u8, value: []const u8 };
@@ -2088,9 +2077,6 @@ fn drawHistory(self: *Self, c: Ctx) void {
     ui.drawButton("Prev", prev_x, bar_y, third_w, btn_h, prev_color);
     ui.drawButton("Copy", copy_x, bar_y, third_w, btn_h, .{ .r = 50, .g = 120, .b = 60, .a = 255 });
     ui.drawButton("Next", next_x, bar_y, third_w, btn_h, next_color);
-
-    // Footer: [Back to latest]
-    ui.drawButton("Back", c.L.pad, footer_y, c.sw - 2 * c.L.pad, btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
 
     // Header (drawn last so it covers scrolled content).
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
