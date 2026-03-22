@@ -6,7 +6,7 @@ const App = @import("App.zig");
 const font = @import("font.zig");
 
 pub fn main() !void {
-    rl.initWindow(720, 1280, "Loki");
+    rl.initWindow(1024, 1980, "Loki");
     defer rl.closeWindow();
     rl.setTargetFPS(60);
 

@@ -133,6 +133,8 @@ sync_from_browser: bool = false,
 delete_confirm: ConfirmButton = .{},
 sync_ip_err: bool = false,
 sync_pw_err: bool = false,
+/// Android only: true while we wait for biometric auth to pre-fill the sync password.
+sync_bio_pending: bool = false,
 
 // Search
 search_field: ui.TextField = .{},
@@ -385,7 +387,7 @@ fn browserPath(self: *const Self) []const u8 {
     return self.browser_path_buf[0..self.browser_path_len];
 }
 
-/// Append `dir_name` to the current path (e.g. "" + "Social" → "Social").
+/// Append `dir_name` to the current path (e.g. "Home" + "Banking" → "Home/Banking").
 fn navigateInto(self: *Self, dir_name: []const u8) void {
     const cur = self.browserPath();
     var new_len: usize = 0;
@@ -469,10 +471,11 @@ fn unlockWithPassword(self: *Self, pw: []const u8) bool {
 
 fn inputUnlock(self: *Self, c: Ctx) void {
     const fw = c.sw - 2 * c.L.pad;
-    const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
+    const del_btn_h = c.L.detail_btn_h;
+    const del_btn_y = c.sh - del_btn_h - c.L.pad;
 
     // Delete DB (two-tap confirmation) — only when a DB exists
-    if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, c.L.btn_h)) {
+    if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, del_btn_h)) {
         if (self.delete_confirm.pending) {
             if (self.db) |*d| d.deinit();
             self.db = null;
@@ -567,8 +570,8 @@ fn inputUnlock(self: *Self, c: Ctx) void {
 
         // ---- "Use biometrics" button (visible when enrolled) ----
         if (self.bio_enrolled and !self.unlock_dialog_shown) {
-            const bio_btn_y = del_btn_y - c.L.btn_h - @divTrunc(c.L.pad, 2);
-            if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, bio_btn_y, fw, c.L.btn_h)) {
+            const bio_btn_y = del_btn_y - del_btn_h - @divTrunc(c.L.pad, 2);
+            if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, bio_btn_y, fw, del_btn_h)) {
                 ui.biometricAuthenticate();
                 self.bio_auth_pending = true;
                 self.bio_err = null;
@@ -693,8 +696,8 @@ fn inputBrowser(self: *Self, c: Ctx) void {
         const fab_size = c.L.fab_size;
         const fab_x = c.sw - fab_size - c.L.pad;
         const fab_y = c.sh - fab_size - c.L.pad;
-        const bot_btn_h = fab_size;
-        const bot_btn_y = fab_y;
+        const bot_btn_h = c.L.detail_btn_h;
+        const bot_btn_y = fab_y + @divTrunc(fab_size - bot_btn_h, 2);
         const lock_btn_w = c.L.hdr_btn_w;
         const lock_btn_x = c.L.pad;
         const sync_btn_w = c.L.hdr_btn_w;
@@ -706,6 +709,8 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.sync_err = null;
             self.sync_from_browser = true;
             self.delete_confirm.reset();
+            self.sync_pw_field.zeroAndClear();
+            self.sync_bio_pending = false;
             self.phase = .sync_setup;
         } else if (ui.inRect(c.mx, c.my, lock_btn_x, bot_btn_y, lock_btn_w, bot_btn_h)) {
             self.lock();
@@ -716,6 +721,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.navigateUp();
         } else if (ui.inRect(c.mx, c.my, fab_x, fab_y, fab_size, fab_size)) {
             for (0..ui.field_count) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.PW_IDX };
+            self.edit_fields[ui.PATH_IDX].setDefault(self.browserPath());
             self.edit_is_new = true;
             self.edit_show_pw = false;
             self.edit_pending = null;
@@ -802,9 +808,9 @@ fn inputDetail(self: *Self, c: Ctx) void {
         if (rl.isKeyPressed(.escape) or rl.isKeyPressed(.backspace))
             self.phase = .browser;
     }
-    const del_btn_h = c.L.btn_h;
+    const del_btn_h = c.L.detail_btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
-    const hist_btn_h = c.L.btn_h;
+    const hist_btn_h = c.L.detail_btn_h;
     const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
     if (c.is_tap) {
         if (ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
@@ -1133,7 +1139,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
 
     if (c.is_tap) {
         const hdr_btn_w = c.L.hdr_btn_w;
-        const btn_h = c.L.btn_h;
+        const btn_h = c.L.detail_btn_h;
         const bar_y = c.sh - btn_h - c.L.pad;
         const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
 
@@ -1490,6 +1496,29 @@ fn drawPwGen(self: *Self, c: Ctx) void {
 }
 
 fn inputSyncSetup(self: *Self, c: Ctx) void {
+    // ---- Biometric pre-fill poll (Android, sync-from-browser only) ----
+    if (comptime is_android) {
+        if (self.sync_bio_pending) {
+            var rbuf: [ui.max_field + 1]u8 = std.mem.zeroes([ui.max_field + 1]u8);
+            const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
+            if (poll > 0) {
+                // Success: fill the password field; stay on the form so the
+                // user can confirm/edit the IP before pressing Sync.
+                self.sync_bio_pending = false;
+                const n: usize = @intCast(poll - 1);
+                self.sync_pw_field.len = n;
+                @memcpy(self.sync_pw_field.buf[0..n], rbuf[0..n]);
+                @memset(&rbuf, 0);
+                self.sync_pw_err = false;
+            } else if (poll < 0) {
+                // Cancelled — fall back to manual password entry.
+                self.sync_bio_pending = false;
+            }
+            // While pending, block other input so the user waits for the prompt.
+            if (self.sync_bio_pending) return;
+        }
+    }
+
     const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
     const fw = c.sw - 2 * c.L.pad;
     const title_y = form_top;
@@ -1502,6 +1531,8 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
 
     if (self.sync_from_browser and c.is_tap and ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
         self.sync_from_browser = false;
+        self.sync_bio_pending = false;
+        self.sync_pw_field.zeroAndClear();
         self.phase = .browser;
     }
 
@@ -1515,8 +1546,15 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
         } else if (ui.inRect(c.mx, c.my, c.L.pad, pw_field_y, fw, c.L.fh)) {
             self.sync_focus_ip = false;
             if (comptime is_android) {
-                self.sync_pw_field.showDialog("Password", true);
-                self.sync_pending_field = false;
+                if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
+                    // "Use biometrics" button tapped — trigger auth.
+                    ui.biometricAuthenticate();
+                    self.sync_bio_pending = true;
+                    self.sync_pw_err = false;
+                } else {
+                    self.sync_pw_field.showDialog("Password", true);
+                    self.sync_pending_field = false;
+                }
             }
         }
     }
@@ -1595,6 +1633,8 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
             sync.g_ip_len = self.ip_field.len;
             @memcpy(sync.g_pw[0..self.sync_pw_field.len], self.sync_pw_field.buf[0..self.sync_pw_field.len]);
             sync.g_pw_len = self.sync_pw_field.len;
+            // Zero the field immediately — the password is now in sync.g_pw.
+            self.sync_pw_field.zeroAndClear();
             sync.g_status.store(.connecting, .release);
             save_prefs: {
                 var base = fs.openBaseDir() catch break :save_prefs;
@@ -1619,7 +1659,10 @@ fn inputSyncRunning(self: *Self, c: Ctx) void {
     _ = c;
     const s = sync.g_status.load(.acquire);
     if (s == .done) {
-        self.openDbAndPopulate(self.sync_pw_field.slice()) catch {};
+        // Use the password from sync.g_pw — sync_pw_field was zeroed after submit.
+        self.openDbAndPopulate(sync.g_pw[0..sync.g_pw_len]) catch {};
+        @memset(&sync.g_pw, 0);
+        sync.g_pw_len = 0;
         if (self.db != null) {
             self.browser_scroll = 0;
             self.browser_path_len = 0;
@@ -1628,6 +1671,8 @@ fn inputSyncRunning(self: *Self, c: Ctx) void {
             self.phase = .sync_result;
         }
     } else if (s == .failed) {
+        @memset(&sync.g_pw, 0);
+        sync.g_pw_len = 0;
         self.phase = .sync_result;
     }
 }
@@ -1690,11 +1735,12 @@ fn drawUnlock(self: *Self, c: Ctx) void {
     }
 
     // Delete DB button at bottom
-    const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
+    const del_btn_h = c.L.detail_btn_h;
+    const del_btn_y = c.sh - del_btn_h - c.L.pad;
     if (self.delete_confirm.pending) {
-        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
-        ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
     }
     if (self.delete_db_err) |msg| {
         ui.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
@@ -1702,13 +1748,13 @@ fn drawUnlock(self: *Self, c: Ctx) void {
 
     // Biometric button and status (Android only, when enrolled or auth pending).
     if (comptime is_android) {
-        const bio_btn_y = del_btn_y - c.L.btn_h - @divTrunc(c.L.pad, 2);
+        const bio_btn_y = del_btn_y - del_btn_h - @divTrunc(c.L.pad, 2);
 
         if (self.bio_auth_pending) {
             // Show a "waiting" indicator while the system prompt is up.
-            ui.drawButton("Waiting for biometrics...", c.L.pad, bio_btn_y, fw, c.L.btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+            ui.drawButton("Waiting for biometrics...", c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
         } else if (self.bio_enrolled) {
-            ui.drawButton("Unlock with biometrics", c.L.pad, bio_btn_y, fw, c.L.btn_h, .{ .r = 40, .g = 80, .b = 160, .a = 255 });
+            ui.drawButton("Unlock with biometrics", c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 160, .a = 255 });
         }
 
         // Biometric status / error message.
@@ -1850,9 +1896,11 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     const fab_y = c.sh - fab_size - c.L.pad;
     const lock_btn_w = c.L.hdr_btn_w;
     const sync_btn_w = c.L.hdr_btn_w;
-    ui.drawButton("Lock", c.L.pad, fab_y, lock_btn_w, fab_size, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
-    ui.drawButton("Sync", c.L.pad + lock_btn_w + c.L.pad, fab_y, sync_btn_w, fab_size, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
-    ui.drawButton("+", fab_x, fab_y, fab_size, fab_size, .{ .r = 0, .g = 135, .b = 190, .a = 255 });
+    const small_btn_h = c.L.detail_btn_h;
+    const small_btn_y = fab_y; // + @divTrunc(fab_size - small_btn_h, 2);
+    ui.drawButton("Lock", c.L.pad, small_btn_y, lock_btn_w, small_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+    ui.drawButton("Sync", c.L.pad + lock_btn_w + c.L.pad, small_btn_y, sync_btn_w, small_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
+    ui.drawButton("+", fab_x, small_btn_y, small_btn_h, small_btn_h, .{ .r = 0, .g = 135, .b = 190, .a = 255 });
 
     // Browser toast (e.g. biometric enroll result).
     if (self.browser_toast) |msg| {
@@ -1922,7 +1970,7 @@ fn drawEntryFields(
         }
 
         if (is_pw) {
-            const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
+            const toggle_h = c.L.detail_btn_h;
             const toggle_label: [:0]const u8 = if (show_pw) "Hide" else "Show";
             ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
         }
@@ -1940,7 +1988,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
     const scroll_i: i32 = @intFromFloat(self.detail_scroll);
 
     // Delete button (pinned bottom)
-    const del_btn_h = c.L.btn_h;
+    const del_btn_h = c.L.detail_btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
 
     drawEntryFields(entry, self.detail_show_pw, scroll_i, del_btn_y, c);
@@ -1951,7 +1999,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
     }
 
     // "View History" button — sits above Delete.
-    const hist_btn_h = c.L.btn_h;
+    const hist_btn_h = c.L.detail_btn_h;
     const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
     ui.drawButton("View History", c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 255 });
 
@@ -2062,7 +2110,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
 
                 if (is_pw_field) {
                     const btn_w = c.L.toggle_w;
-                    const btn_h2 = @divTrunc(c.L.detail_row_h * 2, 3);
+                    const btn_h2 = c.L.detail_btn_h;
                     const btn_y2 = fy + @divTrunc(c.L.detail_row_h - btn_h2, 2);
                     // Show/Hide toggle (rightmost)
                     if (comptime is_android) {
@@ -2112,7 +2160,7 @@ fn drawHistory(self: *Self, c: Ctx) void {
     const scroll_i: i32 = @intFromFloat(self.hist_scroll);
 
     // Bottom button bar.
-    const btn_h = c.L.btn_h;
+    const btn_h = c.L.detail_btn_h;
     const bar_y = c.sh - btn_h - c.L.pad;
 
     drawEntryFields(entry, self.hist_show_pw, scroll_i, bar_y, c);
@@ -2192,7 +2240,19 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     ui.drawTextField(&self.ip_field, c.L.pad, ip_field_y, fw, c.L.fh, self.sync_focus_ip, self.sync_ip_err);
 
     ui.drawText("Password", c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
-    ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+    if (comptime is_android) {
+        if (self.sync_bio_pending) {
+            ui.drawButton("Waiting for biometrics...", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+        } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
+            ui.drawButton("Use biometrics", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 90, .b = 160, .a = 255 });
+        } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len > 0) {
+            ui.drawButton("Password set via biometrics", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 30, .g = 80, .b = 50, .a = 255 });
+        } else {
+            ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+        }
+    } else {
+        ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+    }
 
     const submit_label: [:0]const u8 = if (self.first_use) "Fetch" else "Sync";
     ui.drawButton(submit_label, c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);

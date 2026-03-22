@@ -106,6 +106,7 @@ pub const Layout = struct {
     hdr_btn_w: i32, // header button width (Back / Save / Edit)
     fab_size: i32, // floating action button size
     back_btn_w: i32, // "< Back" tap zone width (sw / 3)
+    detail_btn_h: i32, // height of secondary buttons in detail view (View History, Delete)
 
     pub fn compute(sw: i32) Layout {
         return .{
@@ -116,14 +117,15 @@ pub const Layout = struct {
             .btn_h = @divTrunc(sw, 8), //  60 @ 480
             .fs_hdr = @divTrunc(sw, 17), //  28 @ 480
             .fs_body = @divTrunc(sw, 24), //  20 @ 480
-            .fs_label = @divTrunc(sw, 30), //  16 @ 480
+            .fs_label = @divTrunc(sw, 26), //  18 @ 480
             .fs_small = @divTrunc(sw, 38), //  12 @ 480
             .detail_row_h = @divTrunc(sw * 3, 16), //  90 @ 480
-            .label_w = @divTrunc(sw, 3), // 160 @ 480
-            .toggle_w = @divTrunc(sw, 5), //  96 @ 480
+            .label_w = @divTrunc(sw, 5), //  96 @ 480
+            .toggle_w = @divTrunc(sw, 7), //  68 @ 480
             .hdr_btn_w = @divTrunc(sw, 4), // 120 @ 480
             .fab_size = @divTrunc(sw, 7), //  68 @ 480
             .back_btn_w = @divTrunc(sw, 3), // 160 @ 480
+            .detail_btn_h = @divTrunc(sw, 12), //  40 @ 480
         };
     }
 };
