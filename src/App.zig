@@ -44,9 +44,27 @@ const Ctx = struct {
     sw: i32,
     sh: i32,
     L: ui.Layout,
-    mx: f32,
-    my: f32,
+    mx: f32, // raw mouse x (window coords)
+    my: f32, // raw mouse y (window coords)
+    /// Mouse x relative to the content column origin.
+    cmx: f32,
     is_tap: bool,
+
+    /// Mouse wheel movement this frame (positive = scroll up / toward user).
+    wheel: f32,
+
+    /// Content column left edge (== L.content_x).
+    inline fn cx(self: Ctx) i32 {
+        return self.L.content_x;
+    }
+    /// Content column width (== L.content_w).
+    inline fn cw(self: Ctx) i32 {
+        return self.L.content_w;
+    }
+    /// Convert a column-relative x to a window-absolute x.
+    inline fn ox(self: Ctx, x: i32) i32 {
+        return self.L.content_x + x;
+    }
 };
 
 // ---- Error set for DB open ----
@@ -234,7 +252,7 @@ fn lock(self: *Self) void {
 pub fn update(self: *Self) void {
     const sw = rl.getScreenWidth();
     const sh = rl.getScreenHeight();
-    const L = ui.Layout.compute(sw);
+    const L = ui.Layout.compute(sw, sh);
 
     const mouse = rl.getMousePosition();
     const mx = mouse.x;
@@ -244,7 +262,16 @@ pub fn update(self: *Self) void {
     if (rl.isMouseButtonDown(.left)) self.drag_accum += @abs(rl.getMouseDelta().y);
     const is_tap = rl.isMouseButtonReleased(.left) and self.drag_accum < 10;
 
-    const c = Ctx{ .sw = sw, .sh = sh, .L = L, .mx = mx, .my = my, .is_tap = is_tap };
+    const c = Ctx{
+        .sw = sw,
+        .sh = sh,
+        .L = L,
+        .mx = mx,
+        .my = my,
+        .cmx = mx - @as(f32, @floatFromInt(L.content_x)),
+        .wheel = rl.getMouseWheelMove(),
+        .is_tap = is_tap,
+    };
 
     // Track last user interaction for auto-lock
     const now = rl.getTime();
@@ -470,12 +497,12 @@ fn unlockWithPassword(self: *Self, pw: []const u8) bool {
 }
 
 fn inputUnlock(self: *Self, c: Ctx) void {
-    const fw = c.sw - 2 * c.L.pad;
+    const fw = c.cw() - 2 * c.L.pad;
     const del_btn_h = c.L.detail_btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
 
     // Delete DB (two-tap confirmation) — only when a DB exists
-    if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, del_btn_h)) {
+    if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, del_btn_y, fw, del_btn_h)) {
         if (self.delete_confirm.pending) {
             if (self.db) |*d| d.deinit();
             self.db = null;
@@ -559,8 +586,8 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             self.unlock_dialog_shown = false;
         } else if (c.is_tap and !self.unlock_dialog_shown) {
             const field_y = @divTrunc(c.sh * 2, 5);
-            const fw2 = c.sw - 2 * c.L.pad;
-            if (ui.inRect(c.mx, c.my, c.L.pad, field_y, fw2, c.L.fh)) {
+            const fw2 = c.cw() - 2 * c.L.pad;
+            if (ui.inRect(c.cmx, c.my, c.L.pad, field_y, fw2, c.L.fh)) {
                 self.unlock_pw.showDialog("Enter password", true);
                 self.unlock_dialog_shown = true;
                 self.unlock_err = null;
@@ -571,7 +598,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
         // ---- "Use biometrics" button (visible when enrolled) ----
         if (self.bio_enrolled and !self.unlock_dialog_shown) {
             const bio_btn_y = del_btn_y - del_btn_h - @divTrunc(c.L.pad, 2);
-            if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, bio_btn_y, fw, del_btn_h)) {
+            if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, bio_btn_y, fw, del_btn_h)) {
                 ui.biometricAuthenticate();
                 self.bio_auth_pending = true;
                 self.bio_err = null;
@@ -584,10 +611,10 @@ fn inputUnlock(self: *Self, c: Ctx) void {
         while (ch != 0) : (ch = rl.getCharPressed()) {
             if (ch >= 32 and ch < 127) self.unlock_pw.append(@intCast(ch));
         }
-        const btn_w = c.sw - 2 * c.L.pad;
+        const btn_w = c.cw() - 2 * c.L.pad;
         const btn_y = @divTrunc(c.sh * 3, 5);
         const open_pressed = rl.isKeyPressed(.enter) or
-            (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, btn_y, btn_w, c.L.btn_h));
+            (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, btn_w, c.L.btn_h));
         if (open_pressed) {
             _ = self.unlockWithPassword(self.unlock_pw.slice());
         }
@@ -598,6 +625,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonDown(.left)) {
         self.browser_scroll -= rl.getMouseDelta().y;
     }
+    self.browser_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.row_h));
 
     // Poll biometric enroll result (enroll fires after a successful password unlock
     // while the user is already in the browser view).
@@ -636,13 +664,13 @@ fn inputBrowser(self: *Self, c: Ctx) void {
                 self.search_pending = false;
             }
         } else if (c.is_tap and !self.search_pending and
-            ui.inRect(c.mx, c.my, c.L.pad, c.L.hdr_h + @divTrunc(c.L.pad, 2), c.sw - 2 * c.L.pad, c.L.fh))
+            ui.inRect(c.cmx, c.my, c.L.pad, c.L.hdr_h + @divTrunc(c.L.pad, 2), c.cw() - 2 * c.L.pad, c.L.fh))
         {
             self.search_field.showDialog("Search", false);
             self.search_pending = true;
         }
     } else {
-        if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, c.L.hdr_h + @divTrunc(c.L.pad, 2), c.sw - 2 * c.L.pad, c.L.fh)) {
+        if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, c.L.hdr_h + @divTrunc(c.L.pad, 2), c.cw() - 2 * c.L.pad, c.L.fh)) {
             self.search_focused = true;
         } else if (c.is_tap) {
             self.search_focused = false;
@@ -694,7 +722,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
 
     if (c.is_tap) {
         const fab_size = c.L.fab_size;
-        const fab_x = c.sw - fab_size - c.L.pad;
+        const fab_x = c.cw() - fab_size - c.L.pad;
         const fab_y = c.sh - fab_size - c.L.pad;
         const bot_btn_h = c.L.detail_btn_h;
         const bot_btn_y = fab_y + @divTrunc(fab_size - bot_btn_h, 2);
@@ -703,7 +731,7 @@ fn inputBrowser(self: *Self, c: Ctx) void {
         const sync_btn_w = c.L.hdr_btn_w;
         const sync_btn_x = lock_btn_x + lock_btn_w + c.L.pad;
 
-        if (ui.inRect(c.mx, c.my, sync_btn_x, bot_btn_y, sync_btn_w, bot_btn_h)) {
+        if (ui.inRect(c.cmx, c.my, sync_btn_x, bot_btn_y, sync_btn_w, bot_btn_h)) {
             self.first_use = false;
             self.delete_db_err = null;
             self.sync_err = null;
@@ -712,14 +740,14 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.sync_pw_field.zeroAndClear();
             self.sync_bio_pending = false;
             self.phase = .sync_setup;
-        } else if (ui.inRect(c.mx, c.my, lock_btn_x, bot_btn_y, lock_btn_w, bot_btn_h)) {
+        } else if (ui.inRect(c.cmx, c.my, lock_btn_x, bot_btn_y, lock_btn_w, bot_btn_h)) {
             self.lock();
         } else if (!is_searching and self.browser_path_len > 0 and
-            ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h))
+            ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h))
         {
             // "< Back" tap — navigate up
             self.navigateUp();
-        } else if (ui.inRect(c.mx, c.my, fab_x, fab_y, fab_size, fab_size)) {
+        } else if (ui.inRect(c.cmx, c.my, fab_x, fab_y, fab_size, fab_size)) {
             for (0..ui.field_count) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.PW_IDX };
             self.edit_fields[ui.PATH_IDX].setDefault(self.browserPath());
             self.edit_is_new = true;
@@ -802,6 +830,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonDown(.left)) {
         self.detail_scroll -= rl.getMouseDelta().y;
     }
+    self.detail_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.detail_row_h));
     self.detail_scroll = @max(0, self.detail_scroll);
     if (comptime !is_android) {
         if (rl.isKeyPressed(.h)) self.detail_show_pw = !self.detail_show_pw;
@@ -813,17 +842,17 @@ fn inputDetail(self: *Self, c: Ctx) void {
     const hist_btn_h = c.L.detail_btn_h;
     const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
     if (c.is_tap) {
-        if (ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
+        if (ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
             self.detail_delete_confirm.reset();
             self.phase = .browser;
-        } else if (ui.inRect(c.mx, c.my, c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h)) {
+        } else if (ui.inRect(c.cmx, c.my, c.L.pad, hist_btn_y, c.cw() - 2 * c.L.pad, hist_btn_h)) {
             // "View History" — build chain and enter history phase.
             self.hist_idx = 0;
             self.hist_show_pw = false;
             self.hist_scroll = 0;
             self.loadHistory(self.detail_head_hash);
             self.phase = .history;
-        } else if (ui.inRect(c.mx, c.my, c.sw - c.L.back_btn_w, 0, c.L.back_btn_w, c.L.hdr_h)) {
+        } else if (ui.inRect(c.cmx, c.my, c.cw() - c.L.back_btn_w, 0, c.L.back_btn_w, c.L.hdr_h)) {
             if (self.detail_entry) |e| {
                 const vals = [ui.field_count][]const u8{
                     e.title, e.path, e.description, e.url, e.username, e.password, e.notes,
@@ -841,7 +870,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
             self.edit_scroll = 0;
             self.edit_notes_scroll = 0;
             self.phase = .edit;
-        } else if (ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h)) {
+        } else if (ui.inRect(c.cmx, c.my, c.L.pad, del_btn_y, c.cw() - 2 * c.L.pad, del_btn_h)) {
             if (self.detail_delete_confirm.pending) {
                 if (self.db) |*d| {
                     d.deleteEntry(self.detail_entry_id) catch {};
@@ -859,7 +888,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
             const scroll_i: i32 = @intFromFloat(self.detail_scroll);
             const toggle_w = c.L.toggle_w;
             const pw_row_y = c.L.hdr_h + c.L.pad + ui.DETAIL_PW_IDX * c.L.detail_row_h - scroll_i;
-            if (ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
+            if (ui.inRect(c.cmx, c.my, c.cw() - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
                 self.detail_show_pw = !self.detail_show_pw;
             } else if (c.my >= @as(f32, @floatFromInt(c.L.hdr_h)) and
                 c.my < @as(f32, @floatFromInt(del_btn_y)))
@@ -870,7 +899,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
                     };
                     for (0..ui.field_count) |fi| {
                         const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-                        if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
+                        if (ui.inRect(c.cmx, c.my, 0, fy, c.cw(), c.L.detail_row_h)) {
                             var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                             const n = @min(vals[fi].len, ui.max_field);
                             @memcpy(cbuf[0..n], vals[fi][0..n]);
@@ -898,7 +927,7 @@ fn inputEdit(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonPressed(.left)) {
         const si: i32 = @intFromFloat(self.edit_scroll);
         const notes_fy = c.L.hdr_h + @as(i32, @intCast(ui.EDIT_NOTES_IDX)) * c.L.detail_row_h - si;
-        self.drag_in_notes = ui.inRect(c.mx, c.my, 0, notes_fy, c.sw, notes_h);
+        self.drag_in_notes = ui.inRect(c.cmx, c.my, 0, notes_fy, c.cw(), notes_h);
     }
     if (rl.isMouseButtonDown(.left)) {
         if (self.drag_in_notes) {
@@ -907,6 +936,7 @@ fn inputEdit(self: *Self, c: Ctx) void {
             self.edit_scroll -= rl.getMouseDelta().y;
         }
     }
+    self.edit_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.detail_row_h));
 
     // Clamp form scroll.
     const edit_content_h: f32 = @floatFromInt(6 * c.L.detail_row_h + notes_h);
@@ -934,14 +964,14 @@ fn inputEdit(self: *Self, c: Ctx) void {
             for (0..ui.field_count) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-                if (fy >= c.L.hdr_h and ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
+                if (fy >= c.L.hdr_h and ui.inRect(c.cmx, c.my, 0, fy, c.cw(), row_h)) {
                     if (fi == ui.EDIT_PW_IDX and
-                        ui.inRect(c.mx, c.my, c.sw - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
+                        ui.inRect(c.cmx, c.my, c.cw() - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
                     {
                         // Show/Hide toggle (rightmost button)
                         self.edit_show_pw = !self.edit_show_pw;
                     } else if (fi == ui.EDIT_PW_IDX and
-                        ui.inRect(c.mx, c.my, c.sw - 2 * btn_w - 2 * c.L.pad, fy, btn_w, c.L.detail_row_h))
+                        ui.inRect(c.cmx, c.my, c.cw() - 2 * btn_w - 2 * c.L.pad, fy, btn_w, c.L.detail_row_h))
                     {
                         // Gen button
                         self.pwgenRegenerate();
@@ -985,10 +1015,10 @@ fn inputEdit(self: *Self, c: Ctx) void {
             for (0..ui.field_count) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-                if (ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
+                if (ui.inRect(c.cmx, c.my, 0, fy, c.cw(), row_h)) {
                     // Check Gen button tap on password row.
                     if (fi == ui.EDIT_PW_IDX and
-                        ui.inRect(c.mx, c.my, c.sw - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
+                        ui.inRect(c.cmx, c.my, c.cw() - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
                     {
                         self.pwgenRegenerate();
                         self.pwgen_open = true;
@@ -1020,11 +1050,11 @@ fn inputEdit(self: *Self, c: Ctx) void {
 
     // Cancel / Save (both platforms)
     const hdr_btn_w = c.L.hdr_btn_w;
-    if (c.is_tap and ui.inRect(c.mx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
+    if (c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
         self.edit_err = null;
         self.phase = .detail;
     }
-    const do_save = c.is_tap and ui.inRect(c.mx, c.my, c.sw - hdr_btn_w, 0, hdr_btn_w, c.L.hdr_h);
+    const do_save = c.is_tap and ui.inRect(c.cmx, c.my, c.cw() - hdr_btn_w, 0, hdr_btn_w, c.L.hdr_h);
     // Enter saves unless Notes is focused (where it inserts a newline instead)
     const do_save_key = enter_pressed and self.edit_focus != ui.EDIT_NOTES_IDX;
     if (do_save or do_save_key) self.doSave();
@@ -1127,6 +1157,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonDown(.left)) {
         self.hist_scroll -= rl.getMouseDelta().y;
     }
+    self.hist_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.detail_row_h));
     self.hist_scroll = @max(0, self.hist_scroll);
 
     if (comptime !is_android) {
@@ -1141,12 +1172,12 @@ fn inputHistory(self: *Self, c: Ctx) void {
         const hdr_btn_w = c.L.hdr_btn_w;
         const btn_h = c.L.detail_btn_h;
         const bar_y = c.sh - btn_h - c.L.pad;
-        const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
+        const third_w = @divTrunc(c.cw() - 4 * c.L.pad, 3);
 
         // "Prev" button — go to an older version (higher index).
         const prev_x = c.L.pad;
         const has_prev = self.hist_idx + 1 < self.hist_hashes.items.len;
-        if (has_prev and ui.inRect(c.mx, c.my, prev_x, bar_y, third_w, btn_h)) {
+        if (has_prev and ui.inRect(c.cmx, c.my, prev_x, bar_y, third_w, btn_h)) {
             self.hist_idx += 1;
             self.loadHistEntry();
             self.hist_scroll = 0;
@@ -1156,7 +1187,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
         // "Next" button — go to a newer version (lower index).
         const next_x = c.L.pad + third_w + c.L.pad + third_w + c.L.pad;
         const has_next = self.hist_idx > 0;
-        if (has_next and ui.inRect(c.mx, c.my, next_x, bar_y, third_w, btn_h)) {
+        if (has_next and ui.inRect(c.cmx, c.my, next_x, bar_y, third_w, btn_h)) {
             self.hist_idx -= 1;
             self.loadHistEntry();
             self.hist_scroll = 0;
@@ -1165,13 +1196,13 @@ fn inputHistory(self: *Self, c: Ctx) void {
 
         // "Copy to new entry" button (middle).
         const copy_x = c.L.pad + third_w + c.L.pad;
-        if (ui.inRect(c.mx, c.my, copy_x, bar_y, third_w, btn_h)) {
+        if (ui.inRect(c.cmx, c.my, copy_x, bar_y, third_w, btn_h)) {
             self.copyHistEntryToNew();
             return;
         }
 
         // "< Back" header tap — return to latest version in detail view.
-        if (ui.inRect(c.mx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
+        if (ui.inRect(c.cmx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
             self.phase = .detail;
             return;
         }
@@ -1181,7 +1212,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
         const scroll_i: i32 = @intFromFloat(self.hist_scroll);
         const toggle_w = c.L.toggle_w;
         const pw_row_y = c.L.hdr_h + c.L.pad + ui.DETAIL_PW_IDX * c.L.detail_row_h - scroll_i;
-        if (ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
+        if (ui.inRect(c.cmx, c.my, c.cw() - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
             self.hist_show_pw = !self.hist_show_pw;
             return;
         }
@@ -1194,7 +1225,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
         };
         for (0..ui.field_count) |fi| {
             const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-            if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
+            if (ui.inRect(c.cmx, c.my, 0, fy, c.cw(), c.L.detail_row_h)) {
                 var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                 const n = @min(vals[fi].len, ui.max_field);
                 @memcpy(cbuf[0..n], vals[fi][0..n]);
@@ -1270,12 +1301,12 @@ fn pwgenAccept(self: *Self) void {
 fn inputPwGen(self: *Self, c: Ctx) void {
     // The overlay is a vertically-centred card.  Compute its geometry the same
     // way drawPwGen does so hit-testing is consistent.
-    const card_w = c.sw - 4 * c.L.pad;
+    const card_w = c.cw() - 4 * c.L.pad;
     const row_h = c.L.btn_h;
     // Rows: title, length, upper, lower, digits, symbols, preview, accept = 8
     const n_rows: i32 = 8;
     const card_h = c.L.pad + c.L.fs_hdr + c.L.pad + n_rows * row_h + @divTrunc(c.L.pad, 2) * (n_rows - 1) + c.L.pad;
-    const card_x = 2 * c.L.pad;
+    const card_x = c.cx() + 2 * c.L.pad;
     const card_y = @divTrunc(c.sh - card_h, 2);
 
     // On desktop, handle keyboard shortcuts.
@@ -1311,7 +1342,7 @@ fn inputPwGen(self: *Self, c: Ctx) void {
     if (!c.is_tap) return;
 
     // Tap outside the card → close.
-    if (!ui.inRect(c.mx, c.my, card_x, card_y, card_w, card_h)) {
+    if (!ui.inRect(c.cmx, c.my, card_x, card_y, card_w, card_h)) {
         self.pwgen_open = false;
         return;
     }
@@ -1322,7 +1353,7 @@ fn inputPwGen(self: *Self, c: Ctx) void {
 
     // Row 0: length  — left/right half-buttons to decrement/increment.
     const r0_y = content_y;
-    if (ui.inRect(c.mx, c.my, card_x, r0_y, card_w, row_h)) {
+    if (ui.inRect(c.cmx, c.my, card_x, r0_y, card_w, row_h)) {
         const mid_x = card_x + @divTrunc(card_w, 2);
         if (c.mx < @as(f32, @floatFromInt(mid_x))) {
             // Left half → decrement
@@ -1348,7 +1379,7 @@ fn inputPwGen(self: *Self, c: Ctx) void {
         .{ .y = content_y + 4 * row_stride, .field = &self.pwgen_opts.use_symbols },
     };
     for (checkboxes) |cb| {
-        if (ui.inRect(c.mx, c.my, card_x, cb.y, card_w, row_h)) {
+        if (ui.inRect(c.cmx, c.my, card_x, cb.y, card_w, row_h)) {
             cb.field.* = !cb.field.*;
             self.pwgenRegenerate();
             return;
@@ -1357,21 +1388,21 @@ fn inputPwGen(self: *Self, c: Ctx) void {
 
     // Row 5: preview — tap regenerates.
     const preview_y = content_y + 5 * row_stride;
-    if (ui.inRect(c.mx, c.my, card_x, preview_y, card_w, row_h)) {
+    if (ui.inRect(c.cmx, c.my, card_x, preview_y, card_w, row_h)) {
         self.pwgenRegenerate();
         return;
     }
 
     // Row 6: accept button.
     const accept_y = content_y + 6 * row_stride;
-    if (ui.inRect(c.mx, c.my, card_x, accept_y, card_w, row_h)) {
+    if (ui.inRect(c.cmx, c.my, card_x, accept_y, card_w, row_h)) {
         self.pwgenAccept();
         return;
     }
 
     // Row 7: cancel button.
     const cancel_y = content_y + 7 * row_stride;
-    if (ui.inRect(c.mx, c.my, card_x, cancel_y, card_w, row_h)) {
+    if (ui.inRect(c.cmx, c.my, card_x, cancel_y, card_w, row_h)) {
         self.pwgen_open = false;
         return;
     }
@@ -1379,14 +1410,14 @@ fn inputPwGen(self: *Self, c: Ctx) void {
 
 /// Draw the password generator overlay card.
 fn drawPwGen(self: *Self, c: Ctx) void {
-    // Dim the background.
+    // Dim the full window background (intentionally full-screen, not just the column).
     rl.drawRectangle(0, 0, c.sw, c.sh, .{ .r = 0, .g = 0, .b = 0, .a = 160 });
 
-    const card_w = c.sw - 4 * c.L.pad;
+    const card_w = c.cw() - 4 * c.L.pad;
     const row_h = c.L.btn_h;
     const n_rows: i32 = 8;
     const card_h = c.L.pad + c.L.fs_hdr + c.L.pad + n_rows * row_h + @divTrunc(c.L.pad, 2) * (n_rows - 1) + c.L.pad;
-    const card_x = 2 * c.L.pad;
+    const card_x = c.cx() + 2 * c.L.pad;
     const card_y = @divTrunc(c.sh - card_h, 2);
 
     // Card background + border.
@@ -1520,7 +1551,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     }
 
     const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
-    const fw = c.sw - 2 * c.L.pad;
+    const fw = c.cw() - 2 * c.L.pad;
     const title_y = form_top;
     const sub_y = title_y + c.L.fs_hdr + c.L.pad;
     const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
@@ -1529,7 +1560,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
 
-    if (self.sync_from_browser and c.is_tap and ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
+    if (self.sync_from_browser and c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
         self.sync_from_browser = false;
         self.sync_bio_pending = false;
         self.sync_pw_field.zeroAndClear();
@@ -1537,13 +1568,13 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     }
 
     if (rl.isMouseButtonPressed(.left) and self.sync_pending_field == null) {
-        if (ui.inRect(c.mx, c.my, c.L.pad, ip_field_y, fw, c.L.fh)) {
+        if (ui.inRect(c.cmx, c.my, c.L.pad, ip_field_y, fw, c.L.fh)) {
             self.sync_focus_ip = true;
             if (comptime is_android) {
                 self.ip_field.showDialog("Server IP", false);
                 self.sync_pending_field = true;
             }
-        } else if (ui.inRect(c.mx, c.my, c.L.pad, pw_field_y, fw, c.L.fh)) {
+        } else if (ui.inRect(c.cmx, c.my, c.L.pad, pw_field_y, fw, c.L.fh)) {
             self.sync_focus_ip = false;
             if (comptime is_android) {
                 if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
@@ -1585,7 +1616,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
 
     // Create new local DB (first use only)
     const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
-    if (self.first_use and c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, create_btn_y, fw, c.L.btn_h)) {
+    if (self.first_use and c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, create_btn_y, fw, c.L.btn_h)) {
         create_db: {
             if (self.sync_pw_field.len == 0) {
                 self.sync_pw_err = true;
@@ -1622,7 +1653,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
 
     // Sync / Fetch submit
     const clicked_submit = rl.isMouseButtonPressed(.left) and
-        ui.inRect(c.mx, c.my, c.L.pad, submit_btn_y, fw, c.L.btn_h);
+        ui.inRect(c.cmx, c.my, c.L.pad, submit_btn_y, fw, c.L.btn_h);
     if (clicked_submit or rl.isKeyPressed(.enter)) {
         if (self.ip_field.len == 0 or self.sync_pw_field.len == 0) {
             self.sync_ip_err = self.ip_field.len == 0;
@@ -1681,7 +1712,7 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
     const btn_y = c.sh - c.L.btn_h - c.L.pad;
     const status = sync.g_status.load(.acquire);
     if (status == .done) {
-        if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h)) {
+        if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, c.cw() - 2 * c.L.pad, c.L.btn_h)) {
             self.unlock_pw.zeroAndClear();
             self.unlock_pw.masked = true;
             self.unlock_err = null;
@@ -1689,11 +1720,11 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
             self.phase = .unlock;
         }
     } else if (status == .failed) {
-        const half_w = @divTrunc(c.sw - 3 * c.L.pad, 2);
-        if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, btn_y, half_w, c.L.btn_h)) {
+        const half_w = @divTrunc(c.cw() - 3 * c.L.pad, 2);
+        if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, half_w, c.L.btn_h)) {
             self.sync_err = null;
             self.phase = .sync_setup;
-        } else if (c.is_tap and ui.inRect(c.mx, c.my, 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h)) {
+        } else if (c.is_tap and ui.inRect(c.cmx, c.my, 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h)) {
             sync.g_status.store(.connecting, .release);
             if (std.Thread.spawn(.{}, sync.syncThread, .{})) |thread| {
                 thread.detach();
@@ -1713,37 +1744,37 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
 fn drawUnlock(self: *Self, c: Ctx) void {
     const title_y = @divTrunc(c.sh, 6);
     const title_tw = ui.measureText("Loki", c.L.fs_hdr * 2);
-    ui.drawText("Loki", @divTrunc(c.sw - title_tw, 2), title_y, c.L.fs_hdr * 2, .white);
+    ui.drawText("Loki", c.cx() + @divTrunc(c.cw() - title_tw, 2), title_y, c.L.fs_hdr * 2, .white);
 
     const sub = "Enter password to open your database.";
     const sub_tw = ui.measureText(sub, c.L.fs_label);
-    ui.drawText(sub, @divTrunc(c.sw - sub_tw, 2), title_y + c.L.fs_hdr * 2 + c.L.pad, c.L.fs_label, .gray);
+    ui.drawText(sub, c.cx() + @divTrunc(c.cw() - sub_tw, 2), title_y + c.L.fs_hdr * 2 + c.L.pad, c.L.fs_label, .gray);
 
     const field_y = @divTrunc(c.sh * 2, 5);
-    const fw = c.sw - 2 * c.L.pad;
-    ui.drawTextField(&self.unlock_pw, c.L.pad, field_y, fw, c.L.fh, true, false);
+    const fw = c.cw() - 2 * c.L.pad;
+    ui.drawTextField(&self.unlock_pw, c.cx() + c.L.pad, field_y, fw, c.L.fh, true, false);
 
     if (self.unlock_err) |msg| {
         const etw = ui.measureText(msg, c.L.fs_label);
-        ui.drawText(msg, @divTrunc(c.sw - etw, 2), field_y + c.L.fh + c.L.pad, c.L.fs_label, .orange);
+        ui.drawText(msg, c.cx() + @divTrunc(c.cw() - etw, 2), field_y + c.L.fh + c.L.pad, c.L.fs_label, .orange);
     }
 
     if (comptime !is_android) {
         const btn_y = @divTrunc(c.sh * 3, 5);
-        ui.drawButton("Open", c.L.pad, btn_y, fw, c.L.btn_h, .{ .r = 30, .g = 140, .b = 200, .a = 255 });
-        ui.drawText("Enter: open", c.L.pad, c.sh - c.L.fs_small * 2 - c.L.pad * 2, c.L.fs_small, .dark_gray);
+        ui.drawButton("Open", c.cx() + c.L.pad, btn_y, fw, c.L.btn_h, .{ .r = 30, .g = 140, .b = 200, .a = 255 });
+        ui.drawText("Enter: open", c.cx() + c.L.pad, c.sh - c.L.fs_small * 2 - c.L.pad * 2, c.L.fs_small, .dark_gray);
     }
 
     // Delete DB button at bottom
     const del_btn_h = c.L.detail_btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
     if (self.delete_confirm.pending) {
-        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Tap again to confirm delete", c.cx() + c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
-        ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Delete DB", c.cx() + c.L.pad, del_btn_y, fw, del_btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
     }
     if (self.delete_db_err) |msg| {
-        ui.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
+        ui.drawText(msg, c.cx() + c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
     }
 
     // Biometric button and status (Android only, when enrolled or auth pending).
@@ -1752,9 +1783,9 @@ fn drawUnlock(self: *Self, c: Ctx) void {
 
         if (self.bio_auth_pending) {
             // Show a "waiting" indicator while the system prompt is up.
-            ui.drawButton("Waiting for biometrics...", c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+            ui.drawButton("Waiting for biometrics...", c.cx() + c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
         } else if (self.bio_enrolled) {
-            ui.drawButton("Unlock with biometrics", c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 160, .a = 255 });
+            ui.drawButton("Unlock with biometrics", c.cx() + c.L.pad, bio_btn_y, fw, del_btn_h, .{ .r = 40, .g = 80, .b = 160, .a = 255 });
         }
 
         // Biometric status / error message.
@@ -1768,7 +1799,7 @@ fn drawUnlock(self: *Self, c: Ctx) void {
                 bio_btn_y - c.L.fs_label - @divTrunc(c.L.pad, 2)
             else
                 del_btn_y - c.L.fs_label - c.L.pad;
-            ui.drawText(msg, @divTrunc(c.sw - etw, 2), msg_y, c.L.fs_label, color);
+            ui.drawText(msg, c.cx() + @divTrunc(c.cw() - etw, 2), msg_y, c.L.fs_label, color);
         }
     }
 }
@@ -1794,7 +1825,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
                 .{ .r = 18, .g = 18, .b = 28, .a = 255 }
             else
                 .{ .r = 24, .g = 24, .b = 36, .a = 255 };
-            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, bg);
+            rl.drawRectangle(c.cx(), row_y, c.cw(), c.L.row_h, bg);
 
             if (row_y >= list_top) {
                 const text_block_h = if (row.path.len > 0)
@@ -1802,13 +1833,13 @@ fn drawBrowser(self: *Self, c: Ctx) void {
                 else
                     c.L.fs_body;
                 const text_y = row_y + @divTrunc(c.L.row_h - text_block_h, 2);
-                ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
+                ui.drawSlice(row.title, c.cx() + c.L.pad, text_y, c.L.fs_body, .white);
                 if (row.path.len > 0) {
-                    ui.drawSlice(row.path, c.L.pad, text_y + c.L.fs_body + @divTrunc(c.L.pad, 2), c.L.fs_small, .gray);
+                    ui.drawSlice(row.path, c.cx() + c.L.pad, text_y + c.L.fs_body + @divTrunc(c.L.pad, 2), c.L.fs_small, .gray);
                 }
-                ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
+                ui.drawText(">", c.cx() + c.cw() - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
             }
-            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+            rl.drawRectangle(c.cx(), row_y + c.L.row_h - 1, c.cw(), 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
         }
     } else {
         // Hierarchical view
@@ -1827,12 +1858,12 @@ fn drawBrowser(self: *Self, c: Ctx) void {
             if (row_y + c.L.row_h <= list_top or row_y > c.sh) continue;
 
             // Directory row — dark blue background, folder icon "▸", sky-blue name
-            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, .{ .r = 10, .g = 20, .b = 40, .a = 255 });
+            rl.drawRectangle(c.cx(), row_y, c.cw(), c.L.row_h, .{ .r = 10, .g = 20, .b = 40, .a = 255 });
             const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
-            ui.drawText("\xef\x83\x9a", c.L.pad, text_y, c.L.fs_body, .sky_blue); // U+F0DA fa-caret_right
-            ui.drawSlice(dn, c.L.pad + c.L.fs_body + @divTrunc(c.L.pad, 2), text_y, c.L.fs_body, .sky_blue);
-            ui.drawText("/", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .{ .r = 60, .g = 120, .b = 200, .a = 255 });
-            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 30, .g = 50, .b = 80, .a = 255 });
+            ui.drawText("\xef\x83\x9a", c.cx() + c.L.pad, text_y, c.L.fs_body, .sky_blue); // U+F0DA fa-caret_right
+            ui.drawSlice(dn, c.cx() + c.L.pad + c.L.fs_body + @divTrunc(c.L.pad, 2), text_y, c.L.fs_body, .sky_blue);
+            ui.drawText("/", c.cx() + c.cw() - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .{ .r = 60, .g = 120, .b = 200, .a = 255 });
+            rl.drawRectangle(c.cx(), row_y + c.L.row_h - 1, c.cw(), 1, .{ .r = 30, .g = 50, .b = 80, .a = 255 });
         }
 
         // Second pass: direct entries in this directory
@@ -1848,28 +1879,28 @@ fn drawBrowser(self: *Self, c: Ctx) void {
                 .{ .r = 18, .g = 18, .b = 28, .a = 255 }
             else
                 .{ .r = 24, .g = 24, .b = 36, .a = 255 };
-            rl.drawRectangle(0, row_y, c.sw, c.L.row_h, bg);
+            rl.drawRectangle(c.cx(), row_y, c.cw(), c.L.row_h, bg);
 
             if (row_y >= list_top) {
                 const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
-                ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
-                ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .dark_gray);
+                ui.drawSlice(row.title, c.cx() + c.L.pad, text_y, c.L.fs_body, .white);
+                ui.drawText(">", c.cx() + c.cw() - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .dark_gray);
             }
-            rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+            rl.drawRectangle(c.cx(), row_y + c.L.row_h - 1, c.cw(), 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
         }
     }
 
     if (!any_visible) {
         const msg: [:0]const u8 = if (is_searching) "No results." else "Empty.";
-        ui.drawText(msg, c.L.pad, list_top + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText(msg, c.cx() + c.L.pad, list_top + c.L.pad, c.L.fs_body, .gray);
     }
 
     // Header (drawn last so it covers scrolled content)
-    rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
 
     if (!is_searching and self.browser_path_len > 0) {
         // In a subdirectory: show "< Back" and current dir name
-        ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+        ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
         const cur = self.browserPath();
         const last_slash = std.mem.lastIndexOfScalar(u8, cur, '/');
         const dir_name = if (last_slash) |i| cur[i + 1 ..] else cur;
@@ -1877,29 +1908,29 @@ fn drawBrowser(self: *Self, c: Ctx) void {
         const dn = @min(dir_name.len, ui.max_field);
         @memcpy(dbuf[0..dn], dir_name[0..dn]);
         const dtw = ui.measureText(&dbuf, c.L.fs_hdr);
-        ui.drawText(&dbuf, @divTrunc(c.sw - dtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+        ui.drawText(&dbuf, c.cx() + @divTrunc(c.cw() - dtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
     } else {
-        ui.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+        ui.drawText("Loki", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
     }
 
     // Search bar
-    rl.drawRectangle(0, c.L.hdr_h, c.sw, search_bar_h, .{ .r = 15, .g = 15, .b = 22, .a = 255 });
+    rl.drawRectangle(c.cx(), c.L.hdr_h, c.cw(), search_bar_h, .{ .r = 15, .g = 15, .b = 22, .a = 255 });
     const sf_y = c.L.hdr_h + @divTrunc(c.L.pad, 2);
-    ui.drawTextField(&self.search_field, c.L.pad, sf_y, c.sw - 2 * c.L.pad, c.L.fh, self.search_focused or self.search_field.len > 0, false);
+    ui.drawTextField(&self.search_field, c.cx() + c.L.pad, sf_y, c.cw() - 2 * c.L.pad, c.L.fh, self.search_focused or self.search_field.len > 0, false);
     if (self.search_field.len == 0) {
-        ui.drawText("Search...", c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
+        ui.drawText("Search...", c.cx() + c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
     }
 
     // Bottom bar: Lock + Sync (left), "+" FAB (right)
     const fab_size = c.L.fab_size;
-    const fab_x = c.sw - fab_size - c.L.pad;
+    const fab_x = c.cx() + c.cw() - fab_size - c.L.pad;
     const fab_y = c.sh - fab_size - c.L.pad;
     const lock_btn_w = c.L.hdr_btn_w;
     const sync_btn_w = c.L.hdr_btn_w;
     const small_btn_h = c.L.detail_btn_h;
     const small_btn_y = fab_y; // + @divTrunc(fab_size - small_btn_h, 2);
-    ui.drawButton("Lock", c.L.pad, small_btn_y, lock_btn_w, small_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
-    ui.drawButton("Sync", c.L.pad + lock_btn_w + c.L.pad, small_btn_y, sync_btn_w, small_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
+    ui.drawButton("Lock", c.cx() + c.L.pad, small_btn_y, lock_btn_w, small_btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+    ui.drawButton("Sync", c.cx() + c.L.pad + lock_btn_w + c.L.pad, small_btn_y, sync_btn_w, small_btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
     ui.drawButton("+", fab_x, small_btn_y, small_btn_h, small_btn_h, .{ .r = 0, .g = 135, .b = 190, .a = 255 });
 
     // Browser toast (e.g. biometric enroll result).
@@ -1908,7 +1939,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
         const tpad = c.L.pad;
         const tw2 = tw + tpad * 2;
         const th = c.L.fs_label + tpad;
-        const tx = @divTrunc(c.sw - tw2, 2);
+        const tx = c.cx() + @divTrunc(c.cw() - tw2, 2);
         const ty = fab_y - th - @divTrunc(c.L.pad, 2);
         rl.drawRectangle(tx, ty, tw2, th, .{ .r = 30, .g = 80, .b = 50, .a = 230 });
         ui.drawText(msg, tx + tpad, ty + @divTrunc(tpad, 2), c.L.fs_label, .white);
@@ -1926,7 +1957,7 @@ fn drawEntryFields(
     bottom_clip_y: i32,
     c: Ctx,
 ) void {
-    const val_x = c.L.label_w + c.L.pad;
+    const val_x = c.cx() + c.L.label_w + c.L.pad;
     const toggle_w = c.L.toggle_w;
 
     const Field = struct { label: []const u8, value: []const u8 };
@@ -1950,9 +1981,9 @@ fn drawEntryFields(
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
         const draw_h = if (is_notes) @max(c.L.detail_row_h, bottom_clip_y - fy) else c.L.detail_row_h;
-        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
+        rl.drawRectangle(c.cx(), fy, c.cw(), draw_h, bg);
 
-        ui.drawSlice(f.label, c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
+        ui.drawSlice(f.label, c.cx() + c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
         const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
         const is_pw = fi == ui.PW_IDX;
@@ -1972,16 +2003,16 @@ fn drawEntryFields(
         if (is_pw) {
             const toggle_h = c.L.detail_btn_h;
             const toggle_label: [:0]const u8 = if (show_pw) "Hide" else "Show";
-            ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+            ui.drawButton(toggle_label, c.cx() + c.cw() - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
         }
 
-        if (!is_notes) rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+        if (!is_notes) rl.drawRectangle(c.cx(), fy + c.L.detail_row_h - 1, c.cw(), 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
     }
 }
 
 fn drawDetail(self: *Self, c: Ctx) void {
     const entry = self.detail_entry orelse {
-        ui.drawText("No entry loaded.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText("No entry loaded.", c.cx() + c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
         return;
     };
 
@@ -1993,15 +2024,15 @@ fn drawDetail(self: *Self, c: Ctx) void {
 
     drawEntryFields(entry, self.detail_show_pw, scroll_i, del_btn_y, c);
     if (self.detail_delete_confirm.pending) {
-        ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
+        ui.drawButton("Tap again to confirm delete", c.cx() + c.L.pad, del_btn_y, c.cw() - 2 * c.L.pad, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
-        ui.drawButton("Delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
+        ui.drawButton("Delete", c.cx() + c.L.pad, del_btn_y, c.cw() - 2 * c.L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
     }
 
     // "View History" button — sits above Delete.
     const hist_btn_h = c.L.detail_btn_h;
     const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
-    ui.drawButton("View History", c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 255 });
+    ui.drawButton("View History", c.cx() + c.L.pad, hist_btn_y, c.cw() - 2 * c.L.pad, hist_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 255 });
 
     // "Copied!" toast
     if (self.copy_feedback_timer > 0) {
@@ -2010,26 +2041,26 @@ fn drawDetail(self: *Self, c: Ctx) void {
         const toast_pad = c.L.pad * 2;
         const toast_w = ttw + toast_pad * 2;
         const toast_h = c.L.fs_body + toast_pad;
-        const toast_x = @divTrunc(c.sw - toast_w, 2);
+        const toast_x = c.cx() + @divTrunc(c.cw() - toast_w, 2);
         const toast_y = del_btn_y - toast_h - c.L.pad;
         rl.drawRectangle(toast_x, toast_y, toast_w, toast_h, .{ .r = 30, .g = 30, .b = 30, .a = 220 });
         ui.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
     }
 
     if (comptime !is_android) {
-        ui.drawText("h: pw  Esc: back", c.L.pad, c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("h: pw  Esc: back", c.cx() + c.L.pad, c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Header (drawn last)
-    rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     const edit_lbl_tw = ui.measureText("Edit", c.L.fs_body);
-    ui.drawText("Edit", c.sw - edit_lbl_tw - c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    ui.drawText("Edit", c.cx() + c.cw() - edit_lbl_tw - c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
 }
 
 fn drawEdit(self: *Self, c: Ctx) void {
     const scroll_i: i32 = @intFromFloat(self.edit_scroll);
-    const val_x = c.L.label_w + c.L.pad;
+    const val_x = c.cx() + c.L.label_w + c.L.pad;
     const notes_h = c.L.detail_row_h * 4;
 
     for (0..ui.field_count) |fi| {
@@ -2045,12 +2076,12 @@ fn drawEdit(self: *Self, c: Ctx) void {
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
         const draw_h = if (fi == ui.EDIT_NOTES_IDX) @max(row_h, c.sh - fy) else row_h;
-        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
+        rl.drawRectangle(c.cx(), fy, c.cw(), draw_h, bg);
 
         if (fy >= c.L.hdr_h) {
             if (fi == ui.EDIT_NOTES_IDX) {
                 // Multi-line Notes field with inner scroll
-                ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + c.L.pad, c.L.fs_label, .gray);
+                ui.drawSlice(ui.edit_field_labels[fi], c.cx() + c.L.pad, fy + c.L.pad, c.L.fs_label, .gray);
                 const notes_fs = c.L.fs_body;
                 const line_spacing = notes_fs + @divTrunc(notes_fs, 3);
                 const text_top = fy + c.L.pad + c.L.fs_label + @divTrunc(c.L.pad, 2);
@@ -2081,10 +2112,10 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     rl.drawRectangle(cursor_x, cursor_y, 2, notes_fs, .sky_blue);
                 }
                 if (comptime is_android) {
-                    ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
+                    ui.drawText(">", c.cx() + c.cw() - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
                 }
             } else {
-                ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
+                ui.drawSlice(ui.edit_field_labels[fi], c.cx() + c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
                 const is_pw_field = fi == ui.EDIT_PW_IDX;
                 const show_plain = !is_pw_field or
@@ -2115,36 +2146,36 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     // Show/Hide toggle (rightmost)
                     if (comptime is_android) {
                         const toggle_label: [:0]const u8 = if (self.edit_show_pw) "Hide" else "Show";
-                        ui.drawButton(toggle_label, c.sw - btn_w - c.L.pad, btn_y2, btn_w, btn_h2, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+                        ui.drawButton(toggle_label, c.cx() + c.cw() - btn_w - c.L.pad, btn_y2, btn_w, btn_h2, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
                     }
                     // Gen button (left of Show/Hide on Android, or standalone on desktop)
                     const gen_x = if (comptime is_android)
-                        c.sw - 2 * btn_w - 2 * c.L.pad
+                        c.cx() + c.cw() - 2 * btn_w - 2 * c.L.pad
                     else
-                        c.sw - btn_w - c.L.pad;
+                        c.cx() + c.cw() - btn_w - c.L.pad;
                     ui.drawButton("Gen", gen_x, btn_y2, btn_w, btn_h2, .{ .r = 40, .g = 90, .b = 150, .a = 255 });
                 } else if (comptime is_android) {
-                    ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
+                    ui.drawText(">", c.cx() + c.cw() - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
                 }
             }
         }
 
-        rl.drawRectangle(0, fy + row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+        rl.drawRectangle(c.cx(), fy + row_h - 1, c.cw(), 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
     }
 
     if (self.edit_err) |msg| {
-        ui.drawText(msg, c.L.pad, c.sh - c.L.fs_label - c.L.pad, c.L.fs_label, .orange);
+        ui.drawText(msg, c.cx() + c.L.pad, c.sh - c.L.fs_label - c.L.pad, c.L.fs_label, .orange);
     }
 
     // Header (drawn last)
     const hdr_btn_w = c.L.hdr_btn_w;
-    rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    ui.drawText("Cancel", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    ui.drawText("Cancel", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     const save_tw = ui.measureText("Save", c.L.fs_body);
-    ui.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
+    ui.drawText("Save", c.cx() + c.cw() - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
 
     if (comptime !is_android) {
-        ui.drawText("Tab: next   Enter: save   Esc: cancel   g: gen pw", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("Tab: next   Enter: save   Esc: cancel   g: gen pw", c.cx() + c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Password generator overlay (drawn on top of everything else).
@@ -2153,7 +2184,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
 
 fn drawHistory(self: *Self, c: Ctx) void {
     const entry = self.hist_entry orelse {
-        ui.drawText("No history entry.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText("No history entry.", c.cx() + c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
         return;
     };
 
@@ -2172,17 +2203,17 @@ fn drawHistory(self: *Self, c: Ctx) void {
         const toast_pad = c.L.pad * 2;
         const toast_w = ttw + toast_pad * 2;
         const toast_h = c.L.fs_body + toast_pad;
-        const toast_x = @divTrunc(c.sw - toast_w, 2);
+        const toast_x = c.cx() + @divTrunc(c.cw() - toast_w, 2);
         const toast_y = bar_y - toast_h - c.L.pad;
         rl.drawRectangle(toast_x, toast_y, toast_w, toast_h, .{ .r = 30, .g = 30, .b = 30, .a = 220 });
         ui.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
     }
 
     // Bottom button bar: [Prev] [Copy to new entry] [Next]
-    const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
-    const prev_x = c.L.pad;
-    const copy_x = c.L.pad + third_w + c.L.pad;
-    const next_x = c.L.pad + third_w + c.L.pad + third_w + c.L.pad;
+    const third_w = @divTrunc(c.cw() - 4 * c.L.pad, 3);
+    const prev_x = c.cx() + c.L.pad;
+    const copy_x = c.cx() + c.L.pad + third_w + c.L.pad;
+    const next_x = c.cx() + c.L.pad + third_w + c.L.pad + third_w + c.L.pad;
 
     const has_prev = self.hist_idx + 1 < self.hist_hashes.items.len;
     const has_next = self.hist_idx > 0;
@@ -2200,8 +2231,8 @@ fn drawHistory(self: *Self, c: Ctx) void {
     ui.drawButton("Next", next_x, bar_y, third_w, btn_h, next_color);
 
     // Header (drawn last so it covers scrolled content).
-    rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
 
     // Version indicator: "Version N / M" centered in header.
     const total = self.hist_hashes.items.len;
@@ -2209,16 +2240,16 @@ fn drawHistory(self: *Self, c: Ctx) void {
     var vbuf: [48:0]u8 = std.mem.zeroes([48:0]u8);
     _ = std.fmt.bufPrintZ(&vbuf, "v{d}/{d}", .{ ver_num, total }) catch {};
     const vtw = ui.measureText(&vbuf, c.L.fs_body);
-    ui.drawText(&vbuf, @divTrunc(c.sw - vtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 180, .g = 180, .b = 200, .a = 255 });
+    ui.drawText(&vbuf, c.cx() + @divTrunc(c.cw() - vtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 180, .g = 180, .b = 200, .a = 255 });
 
     if (comptime !is_android) {
-        ui.drawText("h: pw  Esc: back", c.L.pad, bar_y - c.L.fs_small - @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
+        ui.drawText("h: pw  Esc: back", c.cx() + c.L.pad, bar_y - c.L.fs_small - @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
     }
 }
 
 fn drawSyncSetup(self: *Self, c: Ctx) void {
     const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
-    const fw = c.sw - 2 * c.L.pad;
+    const fw = c.cw() - 2 * c.L.pad;
     const title_y = form_top;
     const sub_y = title_y + c.L.fs_hdr + c.L.pad;
     const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
@@ -2228,55 +2259,55 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
     const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
 
-    ui.drawText("Loki Sync", c.L.pad, title_y, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.cx() + c.L.pad, title_y, c.L.fs_hdr, .white);
 
     const subtitle: [:0]const u8 = if (self.first_use)
         "First use: fetch the database from server"
     else
         "Sync database with server";
-    ui.drawText(subtitle, c.L.pad, sub_y, c.L.fs_label, .gray);
+    ui.drawText(subtitle, c.cx() + c.L.pad, sub_y, c.L.fs_label, .gray);
 
-    ui.drawText("Server IP", c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
-    ui.drawTextField(&self.ip_field, c.L.pad, ip_field_y, fw, c.L.fh, self.sync_focus_ip, self.sync_ip_err);
+    ui.drawText("Server IP", c.cx() + c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
+    ui.drawTextField(&self.ip_field, c.cx() + c.L.pad, ip_field_y, fw, c.L.fh, self.sync_focus_ip, self.sync_ip_err);
 
-    ui.drawText("Password", c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
+    ui.drawText("Password", c.cx() + c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
     if (comptime is_android) {
         if (self.sync_bio_pending) {
-            ui.drawButton("Waiting for biometrics...", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+            ui.drawButton("Waiting for biometrics...", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
         } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
-            ui.drawButton("Use biometrics", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 90, .b = 160, .a = 255 });
+            ui.drawButton("Use biometrics", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 90, .b = 160, .a = 255 });
         } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len > 0) {
-            ui.drawButton("Password set via biometrics", c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 30, .g = 80, .b = 50, .a = 255 });
+            ui.drawButton("Password set via biometrics", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 30, .g = 80, .b = 50, .a = 255 });
         } else {
-            ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+            ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
         }
     } else {
-        ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+        ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
     }
 
     const submit_label: [:0]const u8 = if (self.first_use) "Fetch" else "Sync";
-    ui.drawButton(submit_label, c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);
+    ui.drawButton(submit_label, c.cx() + c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);
 
     if (self.first_use) {
-        ui.drawButton("Create new (no server)", c.L.pad, create_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
+        ui.drawButton("Create new (no server)", c.cx() + c.L.pad, create_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
     }
 
     const err_y = create_btn_y + c.L.btn_h + c.L.pad;
-    if (self.sync_err) |msg| ui.drawText(msg, c.L.pad, err_y, c.L.fs_label, .orange);
+    if (self.sync_err) |msg| ui.drawText(msg, c.cx() + c.L.pad, err_y, c.L.fs_label, .orange);
 
     if (comptime !is_android) {
-        ui.drawText("Tab: switch field   Enter: submit", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("Tab: switch field   Enter: submit", c.cx() + c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Back button in header when reached from browser
     if (self.sync_from_browser) {
-        rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-        ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+        rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+        ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     }
 }
 
 fn drawSyncRunning(_: *Self, c: Ctx) void {
-    ui.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.cx() + c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
     const dot_count = @as(usize, @intCast(@mod(@as(i64, @intFromFloat(rl.getTime() * 3)), 4)));
     const dots = [4][:0]const u8{ "", ".", "..", "..." };
     var sbuf: [64:0]u8 = std.mem.zeroes([64:0]u8);
@@ -2287,32 +2318,32 @@ fn drawSyncRunning(_: *Self, c: Ctx) void {
     };
     _ = std.fmt.bufPrintZ(&sbuf, "{s}{s}", .{ base_label, dots[dot_count] }) catch {};
     const stw = ui.measureText(&sbuf, c.L.fs_body);
-    ui.drawText(&sbuf, @divTrunc(c.sw - stw, 2), @divTrunc(c.sh, 2), c.L.fs_body, .yellow);
+    ui.drawText(&sbuf, c.cx() + @divTrunc(c.cw() - stw, 2), @divTrunc(c.sh, 2), c.L.fs_body, .yellow);
 }
 
 fn drawSyncResult(_: *Self, c: Ctx) void {
-    ui.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.cx() + c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
     const result_y = @divTrunc(c.sh, 4);
     const btn_y = c.sh - c.L.btn_h - c.L.pad;
     switch (sync.g_status.load(.acquire)) {
         .done => {
-            ui.drawText("Sync complete!", c.L.pad, result_y, c.L.fs_body, .green);
-            ui.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .green);
+            ui.drawText("Sync complete!", c.cx() + c.L.pad, result_y, c.L.fs_body, .green);
+            ui.drawText(&sync.g_msg_buf, c.cx() + c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .green);
             if (sync.g_conflict_count > 0) {
                 var cbuf: [128:0]u8 = std.mem.zeroes([128:0]u8);
                 _ = std.fmt.bufPrintZ(&cbuf, "{d} conflict(s) — server version kept", .{sync.g_conflict_count}) catch {};
                 const conflict_y = result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad;
-                ui.drawText(&cbuf, c.L.pad, conflict_y, c.L.fs_label, .orange);
-                ui.drawText("Use the desktop TUI to review", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2), c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
-                ui.drawText("and resolve conflicts.", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2) + c.L.fs_small + 4, c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
+                ui.drawText(&cbuf, c.cx() + c.L.pad, conflict_y, c.L.fs_label, .orange);
+                ui.drawText("Use the desktop TUI to review", c.cx() + c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2), c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
+                ui.drawText("and resolve conflicts.", c.cx() + c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2) + c.L.fs_small + 4, c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
             }
-            ui.drawButton("Open DB", c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
+            ui.drawButton("Open DB", c.cx() + c.L.pad, btn_y, c.cw() - 2 * c.L.pad, c.L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
         },
         .failed => {
-            ui.drawText("Sync failed:", c.L.pad, result_y, c.L.fs_body, .red);
-            ui.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .red);
-            const half_w = @divTrunc(c.sw - 3 * c.L.pad, 2);
-            ui.drawButton("Back", c.L.pad, btn_y, half_w, c.L.btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+            ui.drawText("Sync failed:", c.cx() + c.L.pad, result_y, c.L.fs_body, .red);
+            ui.drawText(&sync.g_msg_buf, c.cx() + c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .red);
+            const half_w = @divTrunc(c.cw() - 3 * c.L.pad, 2);
+            ui.drawButton("Back", c.cx() + c.L.pad, btn_y, half_w, c.L.btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
             ui.drawButton("Retry", 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
         },
         else => {},

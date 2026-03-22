@@ -87,10 +87,20 @@ pub const TextField = struct {
 
 // ---- Responsive layout ----
 //
-// All values scale with screen width so the UI looks right on any phone.
-// Design reference: 480 × 854 (portrait, 1x density).
+// All proportional values scale from `content_w` — the width of the UI
+// column.  On Android (portrait) content_w == sw.  On desktop, content_w is
+// capped so the column never becomes unwieldy on wide windows.
+//
+// Design reference: content_w = 480px (portrait phone, 1x density).
 //
 pub const Layout = struct {
+    /// Full screen / window width.
+    sw: i32,
+    /// X offset of the UI column (0 on Android; centred on wide desktop).
+    content_x: i32,
+    /// Width of the UI column — all layout values are proportional to this.
+    content_w: i32,
+
     hdr_h: i32, // top header / nav-bar height
     row_h: i32, // list row height (browser)
     pad: i32, // general padding
@@ -105,27 +115,34 @@ pub const Layout = struct {
     toggle_w: i32, // Show/Hide toggle button width
     hdr_btn_w: i32, // header button width (Back / Save / Edit)
     fab_size: i32, // floating action button size
-    back_btn_w: i32, // "< Back" tap zone width (sw / 3)
+    back_btn_w: i32, // "< Back" tap zone width (content_w / 3)
     detail_btn_h: i32, // height of secondary buttons in detail view (View History, Delete)
 
-    pub fn compute(sw: i32) Layout {
+    pub fn compute(sw: i32, sh: i32) Layout {
+        // On Android, use the full screen width.  On desktop, cap the column
+        // at 3/4 of the screen height so it stays readable on wide windows.
+        const cw = if (is_android) sw else @min(sw, @divTrunc(sh * 3, 4));
+        const cx = @divTrunc(sw - cw, 2);
         return .{
-            .hdr_h = @divTrunc(sw, 8), //  60 @ 480
-            .row_h = @divTrunc(sw, 6), //  80 @ 480
-            .pad = @max(12, @divTrunc(sw, 30)), //  16 @ 480
-            .fh = @divTrunc(sw, 9), //  53 @ 480
-            .btn_h = @divTrunc(sw, 8), //  60 @ 480
-            .fs_hdr = @divTrunc(sw, 17), //  28 @ 480
-            .fs_body = @divTrunc(sw, 24), //  20 @ 480
-            .fs_label = @divTrunc(sw, 26), //  18 @ 480
-            .fs_small = @divTrunc(sw, 38), //  12 @ 480
-            .detail_row_h = @divTrunc(sw * 3, 16), //  90 @ 480
-            .label_w = @divTrunc(sw, 5), //  96 @ 480
-            .toggle_w = @divTrunc(sw, 7), //  68 @ 480
-            .hdr_btn_w = @divTrunc(sw, 4), // 120 @ 480
-            .fab_size = @divTrunc(sw, 7), //  68 @ 480
-            .back_btn_w = @divTrunc(sw, 3), // 160 @ 480
-            .detail_btn_h = @divTrunc(sw, 12), //  40 @ 480
+            .sw = sw,
+            .content_x = cx,
+            .content_w = cw,
+            .hdr_h = @divTrunc(cw, 8), //  60 @ 480
+            .row_h = @divTrunc(cw, 6), //  80 @ 480
+            .pad = @max(8, @divTrunc(cw, 30)), //  16 @ 480
+            .fh = @divTrunc(cw, 9), //  53 @ 480
+            .btn_h = @divTrunc(cw, 8), //  60 @ 480
+            .fs_hdr = @divTrunc(cw, 17), //  28 @ 480
+            .fs_body = @divTrunc(cw, 24), //  20 @ 480
+            .fs_label = @divTrunc(cw, 26), //  18 @ 480
+            .fs_small = @divTrunc(cw, 38), //  12 @ 480
+            .detail_row_h = @divTrunc(cw * 3, 16), //  90 @ 480
+            .label_w = @divTrunc(cw, 5), //  96 @ 480
+            .toggle_w = @divTrunc(cw, 7), //  68 @ 480
+            .hdr_btn_w = @divTrunc(cw, 4), // 120 @ 480
+            .fab_size = @divTrunc(cw, 7), //  68 @ 480
+            .back_btn_w = @divTrunc(cw, 3), // 160 @ 480
+            .detail_btn_h = @divTrunc(cw, 12), //  40 @ 480
         };
     }
 };
