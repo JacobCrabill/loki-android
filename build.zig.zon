@@ -1,6 +1,6 @@
 .{
     .name = .raylib,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .minimum_zig_version = "0.14.0",
     .fingerprint = 0x13035e5cf42e313f,
     .dependencies = .{
@@ -13,8 +13,8 @@
             .hash = "raylib_zig-5.6.0-dev-KE8REENOBQC-m5nK7M2b5aKSIubJPbPLUYcRhT7aT3RN",
         },
         .loki = .{
-            .url = "https://github.com/JacobCrabill/loki/archive/17ec3571d54a91bb7239f53d19372fbbc9cf1e32.tar.gz",
-            .hash = "loki-0.0.0-pFApzkK-AwBkmIlRbLb0hB8uRSa7l7Sw5tAiyhgKkcAx",
+            .url = "https://github.com/JacobCrabill/loki/archive/4289801757a77c55e5f2b119f2296cdbfd2f5672.tar.gz",
+            .hash = "loki-0.0.0-pFApzjHuAwDdZNAR6qU3MmwEqD26zH4GrUxGpKFahJDu",
         },
     },
     .paths = .{

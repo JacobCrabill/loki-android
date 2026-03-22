@@ -2,9 +2,6 @@
 
 ![Loki-Android Logo](./Loki-Android.png)
 
-> [!NOTE]
-> Under Construction!
-
 **Note**: Due to [an upstream bug](https://github.com/ziglang/zig/issues/20476), you will probably
 receive a warning (or multiple warnings if building for multiple targets) like this:
 

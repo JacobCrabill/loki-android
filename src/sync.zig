@@ -72,11 +72,11 @@ fn doSync(allocator: std.mem.Allocator, base_dir: std.fs.Dir) !void {
     const wi = &w.interface;
 
     if (!fs.dbDirExists()) {
-        try wi.writeAll(&[_]u8{tcp_sync.protocol_fetch});
+        try wi.writeAll(&[_]u8{@intFromEnum(tcp_sync.Protocol.fetch)});
         try tcp_sync.fetchClient(allocator, pw, base_dir, fs.db_name, ri, wi);
         writeMsg("Fetch complete.", .{});
     } else {
-        try wi.writeAll(&[_]u8{tcp_sync.protocol_sync});
+        try wi.writeAll(&[_]u8{@intFromEnum(tcp_sync.Protocol.sync)});
         var db = try loki.Database.open(allocator, base_dir, fs.db_name, pw);
         defer db.deinit();
         var conflicts: std.ArrayList(loki.model.merge.ConflictEntry) = .{};
