@@ -52,6 +52,8 @@ const Ctx = struct {
 
     /// Mouse wheel movement this frame (positive = scroll up / toward user).
     wheel: f32,
+    /// True if the Android system back gesture fired this frame.
+    back: bool,
 
     /// Content column left edge (== L.content_x).
     inline fn cx(self: Ctx) i32 {
@@ -259,7 +261,10 @@ pub fn update(self: *Self) void {
     const my = mouse.y;
 
     if (rl.isMouseButtonPressed(.left)) self.drag_accum = 0;
-    if (rl.isMouseButtonDown(.left)) self.drag_accum += @abs(rl.getMouseDelta().y);
+    if (rl.isMouseButtonDown(.left)) {
+        const d = rl.getMouseDelta();
+        self.drag_accum += @abs(d.x) + @abs(d.y);
+    }
     const is_tap = rl.isMouseButtonReleased(.left) and self.drag_accum < 10;
 
     const c = Ctx{
@@ -271,6 +276,7 @@ pub fn update(self: *Self) void {
         .cmx = mx - @as(f32, @floatFromInt(L.content_x)),
         .wheel = rl.getMouseWheelMove(),
         .is_tap = is_tap,
+        .back = if (comptime is_android) ui.pollBackPressed() != 0 else false,
     };
 
     // Track last user interaction for auto-lock
@@ -832,7 +838,12 @@ fn inputDetail(self: *Self, c: Ctx) void {
     }
     self.detail_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.detail_row_h));
     self.detail_scroll = @max(0, self.detail_scroll);
-    if (comptime !is_android) {
+    if (comptime is_android) {
+        if (c.back) {
+            self.detail_delete_confirm.reset();
+            self.phase = .browser;
+        }
+    } else {
         if (rl.isKeyPressed(.h)) self.detail_show_pw = !self.detail_show_pw;
         if (rl.isKeyPressed(.escape) or rl.isKeyPressed(.backspace))
             self.phase = .browser;
@@ -946,6 +957,10 @@ fn inputEdit(self: *Self, c: Ctx) void {
     const enter_pressed = if (comptime !is_android) rl.isKeyPressed(.enter) else false;
 
     if (comptime is_android) {
+        if (c.back and self.edit_pending == null and !self.pwgen_open) {
+            self.phase = .detail;
+            return;
+        }
         if (self.edit_pending) |fi| {
             var rbuf: [ui.max_field + 1]u8 = undefined;
             const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
@@ -1160,7 +1175,9 @@ fn inputHistory(self: *Self, c: Ctx) void {
     self.hist_scroll -= c.wheel * @as(f32, @floatFromInt(c.L.detail_row_h));
     self.hist_scroll = @max(0, self.hist_scroll);
 
-    if (comptime !is_android) {
+    if (comptime is_android) {
+        if (c.back) self.phase = .detail;
+    } else {
         if (rl.isKeyPressed(.h)) self.hist_show_pw = !self.hist_show_pw;
         if (rl.isKeyPressed(.escape) or rl.isKeyPressed(.backspace)) {
             // Return to latest version in normal detail view.
@@ -1560,7 +1577,9 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
 
-    if (self.sync_from_browser and c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
+    const android_back_swipe = c.back;
+    const sync_back = (c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) or android_back_swipe;
+    if (self.sync_from_browser and sync_back) {
         self.sync_from_browser = false;
         self.sync_bio_pending = false;
         self.sync_pw_field.zeroAndClear();
@@ -1711,6 +1730,7 @@ fn inputSyncRunning(self: *Self, c: Ctx) void {
 fn inputSyncResult(self: *Self, c: Ctx) void {
     const btn_y = c.sh - c.L.btn_h - c.L.pad;
     const status = sync.g_status.load(.acquire);
+    const back_pressed = c.back;
     if (status == .done) {
         if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, c.cw() - 2 * c.L.pad, c.L.btn_h)) {
             self.unlock_pw.zeroAndClear();
@@ -1721,7 +1741,7 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
         }
     } else if (status == .failed) {
         const half_w = @divTrunc(c.cw() - 3 * c.L.pad, 2);
-        if (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, half_w, c.L.btn_h)) {
+        if (back_pressed or (c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, btn_y, half_w, c.L.btn_h))) {
             self.sync_err = null;
             self.phase = .sync_setup;
         } else if (c.is_tap and ui.inRect(c.cmx, c.my, 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h)) {

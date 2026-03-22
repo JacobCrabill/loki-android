@@ -8,4 +8,15 @@ import android.app.NativeActivity;
 // By declaring MainActivity here (in our package), GetObjectClass(activity)
 // returns a Class that was loaded by the app's PathClassLoader, letting us
 // bootstrap find_class() in android_keyboard.c without JNI_OnLoad.
-public class MainActivity extends NativeActivity {}
+//
+// onBackPressed() is overridden so that the system-level back gesture (Android
+// 10+ edge swipe) is forwarded to native code via nativeOnBackPressed() rather
+// than terminating the activity.
+public class MainActivity extends NativeActivity {
+    @Override
+    public void onBackPressed() {
+        nativeOnBackPressed();
+    }
+
+    private static native void nativeOnBackPressed();
+}

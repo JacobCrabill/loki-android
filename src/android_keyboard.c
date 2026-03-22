@@ -204,3 +204,44 @@ int pollTextInputDialog(char *out_buf, int buf_size) {
     memset(g_text_buf, 0, sizeof(g_text_buf));
     return n + 1;  // >0 means success; caller subtracts 1 to get actual length
 }
+
+// ---------------------------------------------------------------------------
+// Back gesture state
+// ---------------------------------------------------------------------------
+
+static atomic_int g_back_pressed = 0;
+static int        g_back_registered = 0;
+
+// Called by MainActivity.onBackPressed() on the UI thread.
+static void on_back_pressed(JNIEnv *env, jclass clazz) {
+    (void)env; (void)clazz;
+    atomic_store_explicit(&g_back_pressed, 1, memory_order_release);
+}
+
+JNIEXPORT void JNICALL
+Java_com_zig_loki_MainActivity_nativeOnBackPressed(JNIEnv *env, jclass clazz) {
+    on_back_pressed(env, clazz);
+}
+
+// Returns 1 if the back gesture fired since the last call, 0 otherwise.
+// On the first call, also registers nativeOnBackPressed via RegisterNatives so
+// the JVM finds it even if the shared library has hidden symbol visibility.
+int pollBackPressed(void) {
+    if (!g_back_registered) {
+        int     detach;
+        JNIEnv *env      = attach(&detach);
+        JavaVM *vm       = GetAndroidApp()->activity->vm;
+        jclass  cls      = find_class(env, "com.zig.loki.MainActivity");
+        if (cls != NULL) {
+            JNINativeMethod methods[] = {{
+                "nativeOnBackPressed", "()V", (void *)on_back_pressed,
+            }};
+            (*env)->RegisterNatives(env, cls, methods, 1);
+            (*env)->DeleteLocalRef(env, cls);
+            g_back_registered = 1;
+        }
+        if (detach) (*vm)->DetachCurrentThread(vm);
+    }
+    return atomic_exchange_explicit(&g_back_pressed, 0, memory_order_acq_rel);
+}
+

@@ -6,6 +6,11 @@ const font = @import("font.zig");
 
 pub const is_android = builtin.abi.isAndroid();
 
+// ---- Android back gesture ----
+
+/// Returns 1 if the system back gesture fired since last call, 0 otherwise.
+pub extern fn pollBackPressed() c_int;
+
 // ---- Android text-input dialog ----
 
 pub extern fn showTextInputDialog(title: [*c]const u8, current: [*c]const u8, is_password: c_int) void;
