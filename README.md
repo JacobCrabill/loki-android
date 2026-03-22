@@ -1,5 +1,7 @@
 # Loki Password Manager: Android App
 
+![Loki-Android Logo](./Loki-Android.png)
+
 > [!NOTE]
 > Under Construction!
 
