@@ -86,3 +86,11 @@ sdkmanager --install "platform-tools"
 export PATH=${ANDROID_HOME}/platform-tools:${PATH}
 sudo usermod -aG plugdev $USER
 ```
+
+## Desktop Dependencies for Raylib
+
+**Ubuntu:**
+
+```
+sudo apt install -y libglx-dev libx11-6 libx11-dev libx11-xcb-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev
+```

@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  # Cancels pending runs when a PR gets updated.
+  group: ${{ github.head_ref || github.run_id }}-${{ github.actor }}
+  cancel-in-progress: true
+
+permissions:
+  # Sets permission policy for `GITHUB_TOKEN`
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Install System Dependencies for Raylib (Desktop Build)
+      # -----------------------------------------------------------------------
+      - name: Install Raylib Dependencies
+        run: sudo apt install -y libglx-dev libx11-6 libx11-dev libx11-xcb-dev libxcursor-dev libxext-dev libxfixes-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev
+
+      # -----------------------------------------------------------------------
+      # Zig — installed via zvm (Zig Version Manager), which uses mirrors
+      # rather than downloading directly from ziglang.org.
+      # -----------------------------------------------------------------------
+      - name: Install Zig via zvm
+        run: |
+          ZIG_VERSION="0.15.2"
+          curl -fsSL https://raw.githubusercontent.com/tristanisham/zvm/master/install.sh | bash
+          export PATH="${HOME}/.zvm/self:${PATH}"
+          zvm i "${ZIG_VERSION}"
+          echo "${HOME}/.zvm/self" >> "${GITHUB_PATH}"
+          echo "${HOME}/.zvm/bin"  >> "${GITHUB_PATH}"
+
+      # -----------------------------------------------------------------------
+      # Android SDK
+      # The hosted runner ships with the Android SDK at $ANDROID_HOME, including
+      # build-tools 35.0.1 and NDK 29.x.  We only need to:
+      #   1. Accept the SDK licence (write the hash that `sdkmanager` would write).
+      #   2. Install the exact NDK patch version our build.zig specifies, because
+      #      the runner ships 29.0.14206865 while we pin 29.0.13113456.
+      # -----------------------------------------------------------------------
+      - name: Accept Android SDK licences
+        run: |
+          mkdir -p "${ANDROID_HOME}/licenses"
+          # android-sdk-license  — required for SDK platforms, build-tools, etc.
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            > "${ANDROID_HOME}/licenses/android-sdk-license"
+          # android-sdk-preview-license — required for NDK 29 (uses preview licence)
+          echo "84831b9409646a918e30573bab4c9c91346d8abd" \
+            > "${ANDROID_HOME}/licenses/android-sdk-preview-license"
+
+      - name: Install NDK 29.0.13113456
+        run: |
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "build-tools;35.0.1"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;29.0.13113456"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools"
+          echo "${ANDROID_HOME}/platform-tools" >> "${GITHUB_PATH}"
+          echo "${JDK_HOME}/bin" >> "${GITHUB_PATH}"
+
+      # -----------------------------------------------------------------------
+      # Zig package cache — restoring it dramatically speeds up repeated builds.
+      # -----------------------------------------------------------------------
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/zig
+          key: zig-pkg-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-pkg-
+
+      # -----------------------------------------------------------------------
+      # Build checks
+      # -----------------------------------------------------------------------
+      - name: Build (desktop)
+        run: zig build
+
+      - name: Build (Android debug)
+        run: zig build -Dandroid
+
+      # -----------------------------------------------------------------------
+      # Release build — only on pushes to main or on tags.
+      # -----------------------------------------------------------------------
+      - name: Build (Android ReleaseSafe)
+        if: github.event_name == 'push'
+        run: zig build -Dandroid -Doptimize=ReleaseSafe
+
+      - name: Upload APK artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: loki-android-${{ github.sha }}
+          path: zig-out/bin/loki-android.apk
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # GitHub Release — only when a tag of the form v* is pushed.
+      # The GITHUB_TOKEN is automatically provided by Actions; no manual secret
+      # setup is required for creating releases on the same repository.
+      # -----------------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zig-out/bin/loki-android.apk
+          generate_release_notes: true
