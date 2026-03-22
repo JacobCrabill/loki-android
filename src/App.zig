@@ -75,6 +75,17 @@ edit_is_new: bool = false,
 edit_show_pw: bool = false,
 drag_in_notes: bool = false,
 
+// Password generator overlay (shown on top of the edit view)
+pwgen_open: bool = false,
+pwgen_length: u8 = 20,
+pwgen_upper: bool = true,
+pwgen_lower: bool = true,
+pwgen_digits: bool = true,
+pwgen_symbols: bool = false,
+/// The most recently generated password preview (null-terminated, length <= 128).
+pwgen_preview: [129]u8 = std.mem.zeroes([129]u8),
+pwgen_preview_len: usize = 0,
+
 // Sync setup
 ip_field: ui.TextField = .{},
 sync_pw_field: ui.TextField = .{ .masked = true },
@@ -745,6 +756,12 @@ fn inputDetail(self: *Self, c: Ctx) void {
 }
 
 fn inputEdit(self: *Self, c: Ctx) void {
+    // If the generator overlay is open, route all input to it.
+    if (self.pwgen_open) {
+        self.inputPwGen(c);
+        return;
+    }
+
     const notes_h = c.L.detail_row_h * 4;
 
     // On press, decide whether the drag belongs to the Notes inner scroll or the form scroll.
@@ -783,15 +800,22 @@ fn inputEdit(self: *Self, c: Ctx) void {
         }
         if (c.is_tap and self.edit_pending == null) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
-            const toggle_w = @divTrunc(c.sw, 5);
+            const btn_w = @divTrunc(c.sw, 5);
             for (0..7) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
                 if (fy >= c.L.hdr_h and ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
                     if (fi == ui.EDIT_PW_IDX and
-                        ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, fy, toggle_w, c.L.detail_row_h))
+                        ui.inRect(c.mx, c.my, c.sw - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
                     {
+                        // Show/Hide toggle (rightmost button)
                         self.edit_show_pw = !self.edit_show_pw;
+                    } else if (fi == ui.EDIT_PW_IDX and
+                        ui.inRect(c.mx, c.my, c.sw - 2 * btn_w - 2 * c.L.pad, fy, btn_w, c.L.detail_row_h))
+                    {
+                        // Gen button
+                        self.pwgenRegenerate();
+                        self.pwgen_open = true;
                     } else if (fi == ui.EDIT_NOTES_IDX) {
                         self.edit_fields[fi].showDialogMultiline(ui.edit_field_labels[fi].ptr);
                         self.edit_pending = fi;
@@ -820,13 +844,27 @@ fn inputEdit(self: *Self, c: Ctx) void {
         if (self.edit_focus == ui.EDIT_NOTES_IDX) {
             self.edit_notes_scroll = std.math.floatMax(f32); // clamped to max on next frame
         }
+        // 'g' key opens the password generator when password field is focused.
+        if (rl.isKeyPressed(.g) and self.edit_focus == ui.EDIT_PW_IDX) {
+            self.pwgenRegenerate();
+            self.pwgen_open = true;
+        }
         if (c.is_tap) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
+            const btn_w = @divTrunc(c.sw, 5);
             for (0..7) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
                 if (ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
-                    self.edit_focus = fi;
+                    // Check Gen button tap on password row.
+                    if (fi == ui.EDIT_PW_IDX and
+                        ui.inRect(c.mx, c.my, c.sw - btn_w - c.L.pad, fy, btn_w, c.L.detail_row_h))
+                    {
+                        self.pwgenRegenerate();
+                        self.pwgen_open = true;
+                    } else {
+                        self.edit_focus = fi;
+                    }
                     break;
                 }
             }
@@ -1087,6 +1125,297 @@ fn copyHistEntryToNew(self: *Self) void {
     self.detail_scroll = 0;
     self.detail_delete_confirm_pending = false;
     self.phase = .detail;
+}
+
+// ============================================================
+// PASSWORD GENERATOR OVERLAY
+// ============================================================
+
+const PWGEN_CHARS_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const PWGEN_CHARS_LOWER = "abcdefghijklmnopqrstuvwxyz";
+const PWGEN_CHARS_DIGITS = "0123456789";
+const PWGEN_CHARS_SYMBOLS = "!@#$%^&*()-_=+[]{}|;:',.<>?/`~";
+const PWGEN_MIN_LEN: u8 = 8;
+const PWGEN_MAX_LEN: u8 = 128;
+
+/// Regenerate the preview password from the current generator settings.
+fn pwgenRegenerate(self: *Self) void {
+    // Build pool from enabled character sets.
+    var pool: [256]u8 = undefined;
+    var pool_len: usize = 0;
+    if (self.pwgen_upper) {
+        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_UPPER.len], PWGEN_CHARS_UPPER);
+        pool_len += PWGEN_CHARS_UPPER.len;
+    }
+    if (self.pwgen_lower) {
+        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_LOWER.len], PWGEN_CHARS_LOWER);
+        pool_len += PWGEN_CHARS_LOWER.len;
+    }
+    if (self.pwgen_digits) {
+        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_DIGITS.len], PWGEN_CHARS_DIGITS);
+        pool_len += PWGEN_CHARS_DIGITS.len;
+    }
+    if (self.pwgen_symbols) {
+        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_SYMBOLS.len], PWGEN_CHARS_SYMBOLS);
+        pool_len += PWGEN_CHARS_SYMBOLS.len;
+    }
+    // Fallback: if nothing enabled use lowercase.
+    if (pool_len == 0) {
+        @memcpy(pool[0..PWGEN_CHARS_LOWER.len], PWGEN_CHARS_LOWER);
+        pool_len = PWGEN_CHARS_LOWER.len;
+    }
+
+    // Seed a fresh PRNG from the OS.
+    var seed: u64 = undefined;
+    std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        seed = @bitCast(std.time.milliTimestamp());
+    };
+    var rng = std.Random.DefaultPrng.init(seed);
+    const rand = rng.random();
+
+    const len: usize = @intCast(self.pwgen_length);
+    for (0..len) |i| {
+        self.pwgen_preview[i] = pool[rand.uintLessThan(usize, pool_len)];
+    }
+    self.pwgen_preview[len] = 0;
+    self.pwgen_preview_len = len;
+}
+
+/// Accept the generated password: write it into the password edit field and close.
+fn pwgenAccept(self: *Self) void {
+    const n = @min(self.pwgen_preview_len, ui.max_field);
+    self.edit_fields[ui.EDIT_PW_IDX].len = n;
+    @memcpy(self.edit_fields[ui.EDIT_PW_IDX].buf[0..n], self.pwgen_preview[0..n]);
+    self.pwgen_open = false;
+}
+
+/// Handle taps/keys for the password generator overlay.
+fn inputPwGen(self: *Self, c: Ctx) void {
+    // The overlay is a vertically-centred card.  Compute its geometry the same
+    // way drawPwGen does so hit-testing is consistent.
+    const card_w = c.sw - 4 * c.L.pad;
+    const row_h = c.L.btn_h;
+    // Rows: title, length, upper, lower, digits, symbols, preview, accept = 8
+    const n_rows: i32 = 8;
+    const card_h = c.L.pad + c.L.fs_hdr + c.L.pad + n_rows * row_h + @divTrunc(c.L.pad, 2) * (n_rows - 1) + c.L.pad;
+    const card_x = 2 * c.L.pad;
+    const card_y = @divTrunc(c.sh - card_h, 2);
+
+    // On desktop, handle keyboard shortcuts.
+    if (comptime !is_android) {
+        if (rl.isKeyPressed(.escape)) {
+            self.pwgen_open = false;
+            return;
+        }
+        if (rl.isKeyPressed(.r)) {
+            self.pwgenRegenerate();
+            return;
+        }
+        if (rl.isKeyPressed(.enter)) {
+            self.pwgenAccept();
+            return;
+        }
+        if (rl.isKeyPressed(.left) or rl.isKeyPressed(.minus)) {
+            if (self.pwgen_length > PWGEN_MIN_LEN) {
+                self.pwgen_length -= 1;
+                self.pwgenRegenerate();
+            }
+            return;
+        }
+        if (rl.isKeyPressed(.right) or rl.isKeyPressed(.equal)) {
+            if (self.pwgen_length < PWGEN_MAX_LEN) {
+                self.pwgen_length += 1;
+                self.pwgenRegenerate();
+            }
+            return;
+        }
+    }
+
+    if (!c.is_tap) return;
+
+    // Tap outside the card → close.
+    if (!ui.inRect(c.mx, c.my, card_x, card_y, card_w, card_h)) {
+        self.pwgen_open = false;
+        return;
+    }
+
+    // Content starts below the title.
+    const content_y = card_y + c.L.pad + c.L.fs_hdr + c.L.pad;
+    const row_stride = row_h + @divTrunc(c.L.pad, 2);
+
+    // Row 0: length  — left/right half-buttons to decrement/increment.
+    const r0_y = content_y;
+    if (ui.inRect(c.mx, c.my, card_x, r0_y, card_w, row_h)) {
+        const mid_x = card_x + @divTrunc(card_w, 2);
+        if (c.mx < @as(f32, @floatFromInt(mid_x))) {
+            // Left half → decrement
+            if (self.pwgen_length > PWGEN_MIN_LEN) {
+                self.pwgen_length -= 1;
+                self.pwgenRegenerate();
+            }
+        } else {
+            // Right half → increment
+            if (self.pwgen_length < PWGEN_MAX_LEN) {
+                self.pwgen_length += 1;
+                self.pwgenRegenerate();
+            }
+        }
+        return;
+    }
+
+    // Rows 1–4: checkbox toggles.
+    const checkboxes = [4]struct { y: i32, field: *bool }{
+        .{ .y = content_y + 1 * row_stride, .field = &self.pwgen_upper },
+        .{ .y = content_y + 2 * row_stride, .field = &self.pwgen_lower },
+        .{ .y = content_y + 3 * row_stride, .field = &self.pwgen_digits },
+        .{ .y = content_y + 4 * row_stride, .field = &self.pwgen_symbols },
+    };
+    for (checkboxes) |cb| {
+        if (ui.inRect(c.mx, c.my, card_x, cb.y, card_w, row_h)) {
+            cb.field.* = !cb.field.*;
+            self.pwgenRegenerate();
+            return;
+        }
+    }
+
+    // Row 5: preview — tap regenerates.
+    const preview_y = content_y + 5 * row_stride;
+    if (ui.inRect(c.mx, c.my, card_x, preview_y, card_w, row_h)) {
+        self.pwgenRegenerate();
+        return;
+    }
+
+    // Row 6: accept button.
+    const accept_y = content_y + 6 * row_stride;
+    if (ui.inRect(c.mx, c.my, card_x, accept_y, card_w, row_h)) {
+        self.pwgenAccept();
+        return;
+    }
+
+    // Row 7: cancel button.
+    const cancel_y = content_y + 7 * row_stride;
+    if (ui.inRect(c.mx, c.my, card_x, cancel_y, card_w, row_h)) {
+        self.pwgen_open = false;
+        return;
+    }
+}
+
+/// Draw the password generator overlay card.
+fn drawPwGen(self: *Self, c: Ctx) void {
+    // Dim the background.
+    rl.drawRectangle(0, 0, c.sw, c.sh, .{ .r = 0, .g = 0, .b = 0, .a = 160 });
+
+    const card_w = c.sw - 4 * c.L.pad;
+    const row_h = c.L.btn_h;
+    const n_rows: i32 = 8;
+    const card_h = c.L.pad + c.L.fs_hdr + c.L.pad + n_rows * row_h + @divTrunc(c.L.pad, 2) * (n_rows - 1) + c.L.pad;
+    const card_x = 2 * c.L.pad;
+    const card_y = @divTrunc(c.sh - card_h, 2);
+
+    // Card background + border.
+    rl.drawRectangle(card_x, card_y, card_w, card_h, .{ .r = 22, .g = 24, .b = 36, .a = 255 });
+    rl.drawRectangleLines(card_x, card_y, card_w, card_h, .{ .r = 60, .g = 80, .b = 130, .a = 255 });
+
+    // Title.
+    const title = "Generate Password";
+    const title_tw = rl.measureText(title, c.L.fs_hdr);
+    rl.drawText(title, card_x + @divTrunc(card_w - title_tw, 2), card_y + c.L.pad, c.L.fs_hdr, .white);
+
+    const content_y = card_y + c.L.pad + c.L.fs_hdr + c.L.pad;
+    const row_stride = row_h + @divTrunc(c.L.pad, 2);
+    const inner_x = card_x + c.L.pad;
+    const inner_w = card_w - 2 * c.L.pad;
+
+    // Row 0: Length control  [−]  20  [+]
+    {
+        const ry = content_y;
+        rl.drawRectangle(card_x, ry, card_w, row_h, .{ .r = 30, .g = 32, .b = 48, .a = 255 });
+        const dec_w = @divTrunc(inner_w, 5);
+        const inc_w = dec_w;
+        const mid_w = inner_w - dec_w - inc_w;
+        ui.drawButton("-", inner_x, ry, dec_w, row_h, .{ .r = 50, .g = 60, .b = 90, .a = 255 });
+        ui.drawButton("+", inner_x + dec_w + mid_w, ry, inc_w, row_h, .{ .r = 50, .g = 60, .b = 90, .a = 255 });
+        // Centre label
+        var lbuf: [16:0]u8 = std.mem.zeroes([16:0]u8);
+        _ = std.fmt.bufPrintZ(&lbuf, "Length: {d}", .{self.pwgen_length}) catch {};
+        const ltw = rl.measureText(&lbuf, c.L.fs_body);
+        rl.drawText(&lbuf, inner_x + dec_w + @divTrunc(mid_w - ltw, 2), ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
+    }
+
+    // Rows 1–4: checkboxes.
+    const checkbox_rows = [4]struct { label: [:0]const u8, val: bool }{
+        .{ .label = "Uppercase (A-Z)", .val = self.pwgen_upper },
+        .{ .label = "Lowercase (a-z)", .val = self.pwgen_lower },
+        .{ .label = "Digits (0-9)", .val = self.pwgen_digits },
+        .{ .label = "Symbols (!@#…)", .val = self.pwgen_symbols },
+    };
+    for (checkbox_rows, 0..) |row, i| {
+        const ry = content_y + @as(i32, @intCast(i + 1)) * row_stride;
+        const bg: rl.Color = if (i % 2 == 0)
+            .{ .r = 26, .g = 28, .b = 42, .a = 255 }
+        else
+            .{ .r = 30, .g = 32, .b = 48, .a = 255 };
+        rl.drawRectangle(card_x, ry, card_w, row_h, bg);
+        // Checkbox indicator.
+        const box_size = @divTrunc(row_h * 2, 3);
+        const box_x = inner_x;
+        const box_y = ry + @divTrunc(row_h - box_size, 2);
+        rl.drawRectangle(box_x, box_y, box_size, box_size, .{ .r = 40, .g = 50, .b = 80, .a = 255 });
+        rl.drawRectangleLines(box_x, box_y, box_size, box_size, .{ .r = 100, .g = 120, .b = 180, .a = 255 });
+        if (row.val) {
+            // Filled checkmark.
+            rl.drawRectangle(box_x + 2, box_y + 2, box_size - 4, box_size - 4, .{ .r = 60, .g = 200, .b = 100, .a = 255 });
+        }
+        const label_x = inner_x + box_size + @divTrunc(c.L.pad, 2);
+        rl.drawText(row.label, label_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
+    }
+
+    // Row 5: preview (tap to regenerate).
+    {
+        const ry = content_y + 5 * row_stride;
+        rl.drawRectangle(card_x, ry, card_w, row_h, .{ .r = 18, .g = 22, .b = 38, .a = 255 });
+        rl.drawRectangleLines(card_x, ry, card_w, row_h, .{ .r = 50, .g = 70, .b = 110, .a = 255 });
+        // Show preview (masked stars if password mode, but for generation show it plainly
+        // so the user can verify what they're getting).
+        const prev_cstr: *const [129:0]u8 = @ptrCast(&self.pwgen_preview);
+        const ptw = rl.measureText(prev_cstr, c.L.fs_body);
+        const avail = inner_w - c.L.pad;
+        if (ptw <= avail) {
+            rl.drawText(prev_cstr, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
+        } else {
+            // Too wide: show as many chars as fit from the right (most unique end).
+            var n: usize = self.pwgen_preview_len;
+            while (n > 0) {
+                n -= 1;
+                var tbuf: [129:0]u8 = std.mem.zeroes([129:0]u8);
+                @memcpy(tbuf[0..n], self.pwgen_preview[self.pwgen_preview_len - n ..][0..n]);
+                if (rl.measureText(&tbuf, c.L.fs_body) <= avail) {
+                    rl.drawText(&tbuf, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
+                    break;
+                }
+            }
+        }
+        // "↻" regen hint on right side.
+        const regen_hint = "Tap to regen";
+        rl.drawText(regen_hint, card_x + card_w - c.L.pad - rl.measureText(regen_hint, c.L.fs_small), ry + @divTrunc(row_h - c.L.fs_small, 2), c.L.fs_small, .gray);
+    }
+
+    // Row 6: Use this password button.
+    {
+        const ry = content_y + 6 * row_stride;
+        ui.drawButton("Use this password", card_x, ry, card_w, row_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
+    }
+
+    // Row 7: Cancel button.
+    {
+        const ry = content_y + 7 * row_stride;
+        ui.drawButton("Cancel", card_x, ry, card_w, row_h, .{ .r = 80, .g = 40, .b = 40, .a = 255 });
+    }
+
+    if (comptime !is_android) {
+        const hint = "r: regen  Enter: use  Esc: cancel  ←/→: length";
+        rl.drawText(hint, card_x, card_y + card_h + @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
+    }
 }
 
 fn inputSyncSetup(self: *Self, c: Ctx) void {
@@ -1618,15 +1947,23 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
                 }
 
-                if (comptime is_android) {
-                    if (is_pw_field) {
-                        const toggle_w = @divTrunc(c.sw, 5);
-                        const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
+                if (is_pw_field) {
+                    const btn_w = @divTrunc(c.sw, 5);
+                    const btn_h2 = @divTrunc(c.L.detail_row_h * 2, 3);
+                    const btn_y2 = fy + @divTrunc(c.L.detail_row_h - btn_h2, 2);
+                    // Show/Hide toggle (rightmost)
+                    if (comptime is_android) {
                         const toggle_label: [:0]const u8 = if (self.edit_show_pw) "Hide" else "Show";
-                        ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
-                    } else {
-                        rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
+                        ui.drawButton(toggle_label, c.sw - btn_w - c.L.pad, btn_y2, btn_w, btn_h2, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
                     }
+                    // Gen button (left of Show/Hide on Android, or standalone on desktop)
+                    const gen_x = if (comptime is_android)
+                        c.sw - 2 * btn_w - 2 * c.L.pad
+                    else
+                        c.sw - btn_w - c.L.pad;
+                    ui.drawButton("Gen", gen_x, btn_y2, btn_w, btn_h2, .{ .r = 40, .g = 90, .b = 150, .a = 255 });
+                } else if (comptime is_android) {
+                    rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
                 }
             }
         }
@@ -1646,8 +1983,11 @@ fn drawEdit(self: *Self, c: Ctx) void {
     rl.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
 
     if (comptime !is_android) {
-        rl.drawText("Tab: next   Enter: newline(Notes)/save   Esc: cancel", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        rl.drawText("Tab: next   Enter: save   Esc: cancel   g: gen pw", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
+
+    // Password generator overlay (drawn on top of everything else).
+    if (self.pwgen_open) self.drawPwGen(c);
 }
 
 fn drawHistory(self: *Self, c: Ctx) void {
