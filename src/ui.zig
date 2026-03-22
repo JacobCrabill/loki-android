@@ -28,6 +28,11 @@ pub extern fn pollBiometricResult(out_buf: [*]u8, buf_size: c_int) c_int;
 // ---- Text input field ----
 
 pub const max_field = 511;
+// C-side result buffers (RESULT_BUF_SIZE in android_keyboard.c / android_biometric.c)
+// must equal max_field + 1.  This comptime assertion documents the coupling.
+comptime {
+    std.debug.assert(max_field + 1 == 512);
+}
 
 pub const TextField = struct {
     buf: [max_field + 1]u8 = std.mem.zeroes([max_field + 1]u8),
@@ -53,6 +58,13 @@ pub const TextField = struct {
 
     pub fn slice(self: *const TextField) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    /// Overwrite the buffer contents with zeros and reset length.
+    /// Call this as soon as a sensitive value (e.g. password) is no longer needed.
+    pub fn zeroAndClear(self: *TextField) void {
+        @memset(&self.buf, 0);
+        self.len = 0;
     }
 
     pub fn showDialog(self: *const TextField, title: [*c]const u8, is_password: bool) void {
@@ -89,6 +101,10 @@ pub const Layout = struct {
     fs_small: i32, // hint / secondary font size
     detail_row_h: i32, // detail view row height
     label_w: i32, // label column width in detail view
+    toggle_w: i32, // Show/Hide toggle button width
+    hdr_btn_w: i32, // header button width (Back / Save / Edit)
+    fab_size: i32, // floating action button size
+    back_btn_w: i32, // "< Back" tap zone width (sw / 3)
 
     pub fn compute(sw: i32) Layout {
         return .{
@@ -103,6 +119,10 @@ pub const Layout = struct {
             .fs_small = @divTrunc(sw, 38), //  12 @ 480
             .detail_row_h = @divTrunc(sw * 3, 16), //  90 @ 480
             .label_w = @divTrunc(sw, 3), // 160 @ 480
+            .toggle_w = @divTrunc(sw, 5), //  96 @ 480
+            .hdr_btn_w = @divTrunc(sw, 4), // 120 @ 480
+            .fab_size = @divTrunc(sw, 7), //  68 @ 480
+            .back_btn_w = @divTrunc(sw, 3), // 160 @ 480
         };
     }
 };
@@ -142,12 +162,23 @@ pub const Phase = enum {
 
 // ---- Edit / detail field metadata ----
 
-pub const edit_field_labels = [7][:0]const u8{
+pub const field_count: usize = 7;
+pub const edit_field_labels = [field_count][:0]const u8{
     "Title", "Path", "Desc", "URL", "Username", "Password", "Notes",
 };
-pub const EDIT_PW_IDX: usize = 5;
-pub const EDIT_NOTES_IDX: usize = 6;
-pub const DETAIL_PW_IDX: i32 = 5;
+// Field indices — all usize; cast to i32 at use sites where needed.
+pub const TITLE_IDX: usize = 0;
+pub const PATH_IDX: usize = 1;
+pub const DESC_IDX: usize = 2;
+pub const URL_IDX: usize = 3;
+pub const USERNAME_IDX: usize = 4;
+pub const PW_IDX: usize = 5;
+pub const NOTES_IDX: usize = 6;
+// Legacy aliases — kept so existing code compiles without change;
+// prefer the canonical names above for new code.
+pub const EDIT_PW_IDX: usize = PW_IDX;
+pub const EDIT_NOTES_IDX: usize = NOTES_IDX;
+pub const DETAIL_PW_IDX: i32 = PW_IDX;
 
 // ---- Draw helpers ----
 

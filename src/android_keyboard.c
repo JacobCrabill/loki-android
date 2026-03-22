@@ -61,7 +61,10 @@ static jclass find_class(JNIEnv *env, const char *name) {
 // Dialog result state
 // ---------------------------------------------------------------------------
 
-static char       g_text_buf[512];
+// Must match ui.max_field + 1 (declared in ui.zig).
+#define RESULT_BUF_SIZE 512
+
+static char       g_text_buf[RESULT_BUF_SIZE];
 static atomic_int g_text_ready = 0;  // 0=idle, 1=ok, -1=cancelled
 static int        g_natives_registered = 0;
 
@@ -197,5 +200,7 @@ int pollTextInputDialog(char *out_buf, int buf_size) {
     int n   = len < buf_size - 1 ? len : buf_size - 1;
     memcpy(out_buf, g_text_buf, n);
     out_buf[n] = '\0';
+    // Zero the buffer so password text doesn't linger in a static C buffer.
+    memset(g_text_buf, 0, sizeof(g_text_buf));
     return n + 1;  // >0 means success; caller subtracts 1 to get actual length
 }

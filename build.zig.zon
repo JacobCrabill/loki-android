@@ -5,7 +5,6 @@
     .fingerprint = 0x13035e5cf42e313f,
     .dependencies = .{
         .android = .{
-            // .path = "../zig-tools/android-sdk",
             .url = "https://github.com/jacobcrabill/zig-android-sdk/archive/556c70c9d63c062579650402b73b22b83bc748e2.tar.gz",
             .hash = "android-0.3.0-7iz7QnEHAgB0adzAmAdGKFo9KTyLVUUz6VCYlDfZ5tfF",
         },
@@ -14,9 +13,8 @@
             .hash = "raylib_zig-5.6.0-dev-KE8REENOBQC-m5nK7M2b5aKSIubJPbPLUYcRhT7aT3RN",
         },
         .loki = .{
-            // .path = "../loki",
-            .url = "https://github.com/JacobCrabill/loki/archive/7786c61400dc1bce4a90f74279947eaf52d43438.tar.gz",
-            .hash = "loki-0.0.0-pFApzgmbAwD5PIFYujuriFUEOdNFKmFNUUKl_kKOoRiO",
+            .url = "https://github.com/JacobCrabill/loki/archive/17ec3571d54a91bb7239f53d19372fbbc9cf1e32.tar.gz",
+            .hash = "loki-0.0.0-pFApzkK-AwBkmIlRbLb0hB8uRSa7l7Sw5tAiyhgKkcAx",
         },
     },
     .paths = .{

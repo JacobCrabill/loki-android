@@ -52,8 +52,13 @@ static jclass bio_find_class(JNIEnv *env, const char *name) {
 // Result state  (0 = waiting, 1 = ok, -1 = cancelled/failed)
 // ---------------------------------------------------------------------------
 
+// Must match ui.max_field + 1 (declared in ui.zig).
+#define RESULT_BUF_SIZE 512
+
 // Result buffer — either the decrypted password (authenticate) or "" (enroll OK).
-static char       g_bio_buf[512];
+// Zeroed after the result is consumed by pollBiometricResult() to limit the
+// window during which plaintext sits in a static C buffer.
+static char       g_bio_buf[RESULT_BUF_SIZE];
 static atomic_int g_bio_ready = 0;
 
 // Called from Java (UI thread).
@@ -229,5 +234,7 @@ int pollBiometricResult(char *out_buf, int buf_size) {
     int n   = len < buf_size - 1 ? len : buf_size - 1;
     memcpy(out_buf, g_bio_buf, n);
     out_buf[n] = '\0';
+    // Zero the static buffer immediately so the plaintext doesn't linger.
+    memset(g_bio_buf, 0, sizeof(g_bio_buf));
     return n + 1;
 }

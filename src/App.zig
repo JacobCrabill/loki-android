@@ -12,6 +12,32 @@ const sync = @import("sync.zig");
 const is_android = ui.is_android;
 const Self = @This();
 
+// ---- Two-tap confirmation button ----
+
+const ConfirmButton = struct {
+    pending: bool = false,
+    timer: f32 = 0,
+
+    const timeout: f32 = 3.0;
+
+    fn tick(self: *ConfirmButton, dt: f32) void {
+        if (self.pending) {
+            self.timer -= dt;
+            if (self.timer <= 0) self.reset();
+        }
+    }
+
+    fn arm(self: *ConfirmButton) void {
+        self.pending = true;
+        self.timer = timeout;
+    }
+
+    fn reset(self: *ConfirmButton) void {
+        self.pending = false;
+        self.timer = 0;
+    }
+};
+
 // ---- Per-frame context (screen dims, layout, mouse, tap) ----
 
 const Ctx = struct {
@@ -49,6 +75,8 @@ bio_auth_pending: bool = false,
 bio_enroll_pending: bool = false,
 /// Non-null error/status message to show on the unlock screen.
 bio_err: ?[:0]const u8 = null,
+/// When true, bio_err is informational (shown in green); when false, it is an error (orange).
+bio_err_is_info: bool = false,
 
 // DB + browser
 db: ?loki.Database = null,
@@ -61,8 +89,7 @@ detail_entry_id: [20]u8 = undefined,
 detail_head_hash: [20]u8 = undefined,
 detail_show_pw: bool = false,
 detail_scroll: f32 = 0,
-detail_delete_confirm_pending: bool = false,
-detail_delete_confirm_timer: f32 = 0,
+detail_delete_confirm: ConfirmButton = .{},
 
 // History
 /// Ordered chain of version hashes: index 0 = current HEAD, last = genesis.
@@ -77,7 +104,7 @@ hist_scroll: f32 = 0,
 hist_show_pw: bool = false,
 
 // Edit
-edit_fields: [7]ui.TextField = defaultEditFields(),
+edit_fields: [ui.field_count]ui.TextField = defaultEditFields(),
 edit_pending: ?usize = null,
 edit_err: ?[:0]const u8 = null,
 edit_focus: usize = 0,
@@ -89,13 +116,9 @@ drag_in_notes: bool = false,
 
 // Password generator overlay (shown on top of the edit view)
 pwgen_open: bool = false,
-pwgen_length: u8 = 20,
-pwgen_upper: bool = true,
-pwgen_lower: bool = true,
-pwgen_digits: bool = true,
-pwgen_symbols: bool = false,
+pwgen_opts: loki.generator.Options = .{},
 /// The most recently generated password preview (null-terminated, length <= 128).
-pwgen_preview: [129]u8 = std.mem.zeroes([129]u8),
+pwgen_preview: [loki.generator.MAX_LENGTH + 1]u8 = std.mem.zeroes([loki.generator.MAX_LENGTH + 1]u8),
 pwgen_preview_len: usize = 0,
 
 // Sync setup
@@ -107,8 +130,7 @@ sync_pending_field: ?bool = null,
 first_use: bool = false,
 delete_db_err: ?[:0]const u8 = null,
 sync_from_browser: bool = false,
-delete_confirm_pending: bool = false,
-delete_confirm_timer: f32 = 0,
+delete_confirm: ConfirmButton = .{},
 sync_ip_err: bool = false,
 sync_pw_err: bool = false,
 
@@ -120,6 +142,10 @@ search_focused: bool = false,
 // Clipboard toast
 copy_feedback_timer: f32 = 0,
 
+// Browser toast (informational messages that show briefly in the browser view)
+browser_toast: ?[:0]const u8 = null,
+browser_toast_timer: f32 = 0,
+
 // Auto-lock
 last_interaction_time: f64 = 0,
 
@@ -129,9 +155,9 @@ browser_path_len: usize = 0,
 
 // ---- Helpers for field defaults ----
 
-fn defaultEditFields() [7]ui.TextField {
-    var arr: [7]ui.TextField = undefined;
-    for (0..7) |i| arr[i] = .{ .masked = i == ui.EDIT_PW_IDX };
+fn defaultEditFields() [ui.field_count]ui.TextField {
+    var arr: [ui.field_count]ui.TextField = undefined;
+    for (0..ui.field_count) |i| arr[i] = .{ .masked = i == ui.PW_IDX };
     return arr;
 }
 
@@ -180,10 +206,12 @@ fn lock(self: *Self) void {
     self.rows.clearRetainingCapacity();
     if (self.db) |*d| d.deinit();
     self.db = null;
-    self.unlock_pw = .{ .masked = true };
+    self.unlock_pw.zeroAndClear();
+    self.unlock_pw.masked = true;
     self.unlock_err = null;
     self.unlock_dialog_shown = false;
     self.bio_err = null;
+    self.bio_err_is_info = false;
     self.bio_auth_pending = false;
     self.bio_enroll_pending = false;
     self.browser_path_len = 0;
@@ -235,21 +263,24 @@ pub fn update(self: *Self) void {
     }
 
     // Tick timers
-    if (self.delete_confirm_pending) {
-        self.delete_confirm_timer -= rl.getFrameTime();
-        if (self.delete_confirm_timer <= 0) {
-            self.delete_confirm_pending = false;
-            self.delete_confirm_timer = 0;
+    const dt = rl.getFrameTime();
+    self.delete_confirm.tick(dt);
+    self.detail_delete_confirm.tick(dt);
+    if (self.copy_feedback_timer > 0) {
+        self.copy_feedback_timer -= rl.getFrameTime();
+        // Clear the clipboard as soon as the toast timer expires.
+        if (self.copy_feedback_timer <= 0) {
+            self.copy_feedback_timer = 0;
+            rl.setClipboardText("");
         }
     }
-    if (self.detail_delete_confirm_pending) {
-        self.detail_delete_confirm_timer -= rl.getFrameTime();
-        if (self.detail_delete_confirm_timer <= 0) {
-            self.detail_delete_confirm_pending = false;
-            self.detail_delete_confirm_timer = 0;
+    if (self.browser_toast_timer > 0) {
+        self.browser_toast_timer -= rl.getFrameTime();
+        if (self.browser_toast_timer <= 0) {
+            self.browser_toast_timer = 0;
+            self.browser_toast = null;
         }
     }
-    if (self.copy_feedback_timer > 0) self.copy_feedback_timer -= rl.getFrameTime();
 
     // Input
     switch (self.phase) {
@@ -282,38 +313,8 @@ pub fn update(self: *Self) void {
 
 // ---- DB helpers ----
 
-fn openDbAndPopulate(self: *Self, pw_slice: []const u8) OpenError!void {
-    var base = fs.openBaseDir() catch return error.StorageError;
-    defer if (comptime is_android) base.close();
-
-    const password: ?[]const u8 = if (pw_slice.len > 0) pw_slice else null;
-    const opened = loki.Database.open(self.allocator, base, fs.db_name, password) catch |err| {
-        return if (err == error.WrongPassword) error.WrongPassword else error.OpenFailed;
-    };
-
-    if (self.db) |*d| d.deinit();
-    self.db = opened;
-
-    for (self.rows.items) |r| r.deinit(self.allocator);
-    self.rows.clearRetainingCapacity();
-
-    const entries = self.db.?.listEntries();
-    for (entries) |ie| {
-        const title = try self.allocator.dupe(u8, ie.title);
-        errdefer self.allocator.free(title);
-        const path = try self.allocator.dupe(u8, ie.path);
-        errdefer self.allocator.free(path);
-        try self.rows.append(self.allocator, .{
-            .entry_id = ie.entry_id,
-            .head_hash = ie.head_hash,
-            .title = title,
-            .path = path,
-        });
-    }
-    std.mem.sort(ui.BrowserRow, self.rows.items, {}, ui.rowLessThan);
-}
-
-fn repopulateRows(self: *Self, d: *loki.Database) !void {
+/// Rebuild self.rows from d.listEntries(), freeing any previous rows first.
+fn populateRows(self: *Self, d: *loki.Database) !void {
     for (self.rows.items) |r| r.deinit(self.allocator);
     self.rows.clearRetainingCapacity();
     for (d.listEntries()) |ie| {
@@ -331,9 +332,54 @@ fn repopulateRows(self: *Self, d: *loki.Database) !void {
     std.mem.sort(ui.BrowserRow, self.rows.items, {}, ui.rowLessThan);
 }
 
+fn openDbAndPopulate(self: *Self, pw_slice: []const u8) OpenError!void {
+    var base = fs.openBaseDir() catch return error.StorageError;
+    defer if (comptime is_android) base.close();
+
+    const password: ?[]const u8 = if (pw_slice.len > 0) pw_slice else null;
+    const opened = loki.Database.open(self.allocator, base, fs.db_name, password) catch |err| {
+        return if (err == error.WrongPassword) error.WrongPassword else error.OpenFailed;
+    };
+
+    if (self.db) |*d| d.deinit();
+    self.db = opened;
+    try self.populateRows(&self.db.?);
+}
+
+fn repopulateRows(self: *Self, d: *loki.Database) !void {
+    try self.populateRows(d);
+}
+
 // ============================================================
 // BROWSER NAVIGATION HELPERS
 // ============================================================
+
+/// Maximum number of unique immediate subdirectory names at a single level.
+const max_dirs_per_level: usize = 256;
+
+/// Tracks which immediate subdirectory names have already been seen while
+/// iterating over sorted rows, to deduplicate directory entries.
+const SeenDirs = struct {
+    names: [max_dirs_per_level][]const u8 = undefined,
+    len: usize = 0,
+
+    fn contains(self: *const SeenDirs, name: []const u8) bool {
+        for (self.names[0..self.len]) |s| {
+            if (std.mem.eql(u8, s, name)) return true;
+        }
+        return false;
+    }
+
+    /// Returns true if the name was new (not already seen) and was recorded.
+    fn add(self: *SeenDirs, name: []const u8) bool {
+        if (self.contains(name)) return false;
+        if (self.len < max_dirs_per_level) {
+            self.names[self.len] = name;
+            self.len += 1;
+        }
+        return true;
+    }
+};
 
 fn browserPath(self: *const Self) []const u8 {
     return self.browser_path_buf[0..self.browser_path_len];
@@ -400,6 +446,7 @@ fn subdirName(row_path: []const u8, parent_path: []const u8) ?[]const u8 {
 // ============================================================
 
 /// Helper: open the DB with the given password slice and transition to browser.
+/// On success, zeros `unlock_pw` so the plaintext doesn't linger in App state.
 /// Returns true on success.
 fn unlockWithPassword(self: *Self, pw: []const u8) bool {
     self.openDbAndPopulate(pw) catch |err| {
@@ -410,6 +457,8 @@ fn unlockWithPassword(self: *Self, pw: []const u8) bool {
         return false;
     };
     if (self.db != null) {
+        // Zero the password field immediately — the DB is open, it's no longer needed.
+        self.unlock_pw.zeroAndClear();
         self.browser_scroll = 0;
         self.browser_path_len = 0;
         self.phase = .browser;
@@ -424,7 +473,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
 
     // Delete DB (two-tap confirmation) — only when a DB exists
     if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, fw, c.L.btn_h)) {
-        if (self.delete_confirm_pending) {
+        if (self.delete_confirm.pending) {
             if (self.db) |*d| d.deinit();
             self.db = null;
             for (self.rows.items) |r| r.deinit(self.allocator);
@@ -443,10 +492,9 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             } else {
                 self.delete_db_err = "Failed to delete database.";
             }
-            self.delete_confirm_pending = false;
+            self.delete_confirm.reset();
         } else {
-            self.delete_confirm_pending = true;
-            self.delete_confirm_timer = 3.0;
+            self.delete_confirm.arm();
         }
         return;
     }
@@ -454,19 +502,22 @@ fn inputUnlock(self: *Self, c: Ctx) void {
     if (comptime is_android) {
         // ---- Poll biometric authenticate result ----
         if (self.bio_auth_pending) {
-            var rbuf: [ui.max_field + 1]u8 = undefined;
+            var rbuf: [ui.max_field + 1]u8 = std.mem.zeroes([ui.max_field + 1]u8);
             const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
             if (poll > 0) {
                 self.bio_auth_pending = false;
                 // poll > 0 means success; length = poll - 1.
                 const n: usize = @intCast(poll - 1);
                 _ = self.unlockWithPassword(rbuf[0..n]);
+                // Zero the stack buffer regardless of whether unlock succeeded.
+                @memset(&rbuf, 0);
                 if (self.db == null) {
                     // Decryption succeeded but DB open failed — key was probably
                     // invalidated (new biometrics enrolled). Clear enrollment.
                     ui.biometricClearEnrollment();
                     self.bio_enrolled = false;
                     self.bio_err = "Biometric key invalidated. Please re-enroll.";
+                    self.bio_err_is_info = false; // error
                 }
             } else if (poll < 0) {
                 // User cancelled or auth error — fall back to password field.
@@ -476,27 +527,13 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             return;
         }
 
-        // ---- Poll biometric enroll result ----
-        if (self.bio_enroll_pending) {
-            var rbuf: [ui.max_field + 1]u8 = undefined;
-            const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
-            if (poll > 0) {
-                // Empty string = enroll succeeded.
-                self.bio_enroll_pending = false;
-                self.bio_enrolled = true;
-                self.bio_err = "Biometric unlock enabled.";
-            } else if (poll < 0) {
-                self.bio_enroll_pending = false;
-                self.bio_err = "Biometric enroll cancelled.";
-            }
-            return;
-        }
-
         // ---- Text-input dialog poll (password entry) ----
-        var rbuf: [ui.max_field + 1]u8 = undefined;
+        var rbuf: [ui.max_field + 1]u8 = std.mem.zeroes([ui.max_field + 1]u8);
         const poll = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
         if (poll > 0) {
             const n: usize = @intCast(poll - 1);
+            // Copy into unlock_pw temporarily so unlockWithPassword can use it.
+            // unlockWithPassword zeros unlock_pw on success.
             self.unlock_pw.len = n;
             @memcpy(self.unlock_pw.buf[0..n], rbuf[0..n]);
             self.unlock_dialog_shown = false;
@@ -504,13 +541,17 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             // After a successful password unlock, offer to enroll biometrics
             // if available and not yet enrolled.
             if (opened and self.bio_available and !self.bio_enrolled) {
-                // Kick off enroll immediately — the user just proved their password.
+                // Kick off enroll — pass password from rbuf before zeroing it.
                 var pw_cstr: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                 @memcpy(pw_cstr[0..n], rbuf[0..n]);
                 ui.biometricEnroll(&pw_cstr);
+                // Zero pw_cstr immediately after the call.
+                @memset(&pw_cstr, 0);
                 self.bio_enroll_pending = true;
                 // We've already transitioned to .browser; enroll runs in background.
             }
+            // Zero rbuf regardless of outcome.
+            @memset(&rbuf, 0);
         } else if (poll < 0) {
             self.unlock_dialog_shown = false;
         } else if (c.is_tap and !self.unlock_dialog_shown) {
@@ -554,6 +595,26 @@ fn inputBrowser(self: *Self, c: Ctx) void {
     if (rl.isMouseButtonDown(.left)) {
         self.browser_scroll -= rl.getMouseDelta().y;
     }
+
+    // Poll biometric enroll result (enroll fires after a successful password unlock
+    // while the user is already in the browser view).
+    if (comptime is_android) {
+        if (self.bio_enroll_pending) {
+            var rbuf: [ui.max_field + 1]u8 = std.mem.zeroes([ui.max_field + 1]u8);
+            const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
+            if (poll > 0) {
+                self.bio_enroll_pending = false;
+                self.bio_enrolled = true;
+                self.browser_toast = "Biometric unlock enabled.";
+                self.browser_toast_timer = 3.0;
+            } else if (poll < 0) {
+                self.bio_enroll_pending = false;
+                self.browser_toast = "Biometric enroll cancelled.";
+                self.browser_toast_timer = 3.0;
+            }
+        }
+    }
+
     const search_bar_h = c.L.fh + c.L.pad;
     const list_top = c.L.hdr_h + search_bar_h;
     const is_searching = self.search_field.len > 0;
@@ -615,26 +676,12 @@ fn inputBrowser(self: *Self, c: Ctx) void {
         }
     } else {
         const cur_path = self.browserPath();
-        var seen_dirs: [256][]const u8 = undefined;
-        var seen_dirs_len: usize = 0;
+        var seen: SeenDirs = .{};
         for (self.rows.items) |row| {
             if (std.mem.eql(u8, row.path, cur_path)) {
                 row_count += 1; // direct entry
             } else if (subdirName(row.path, cur_path)) |dn| {
-                var already = false;
-                for (seen_dirs[0..seen_dirs_len]) |s| {
-                    if (std.mem.eql(u8, s, dn)) {
-                        already = true;
-                        break;
-                    }
-                }
-                if (!already) {
-                    if (seen_dirs_len < 256) {
-                        seen_dirs[seen_dirs_len] = dn;
-                        seen_dirs_len += 1;
-                    }
-                    row_count += 1;
-                }
+                if (seen.add(dn)) row_count += 1;
             }
         }
     }
@@ -643,14 +690,14 @@ fn inputBrowser(self: *Self, c: Ctx) void {
     self.browser_scroll = std.math.clamp(self.browser_scroll, 0, @max(0, content_h - visible_h));
 
     if (c.is_tap) {
-        const fab_size = @divTrunc(c.sw, 7);
+        const fab_size = c.L.fab_size;
         const fab_x = c.sw - fab_size - c.L.pad;
         const fab_y = c.sh - fab_size - c.L.pad;
         const bot_btn_h = fab_size;
         const bot_btn_y = fab_y;
-        const lock_btn_w = @divTrunc(c.sw, 4);
+        const lock_btn_w = c.L.hdr_btn_w;
         const lock_btn_x = c.L.pad;
-        const sync_btn_w = @divTrunc(c.sw, 4);
+        const sync_btn_w = c.L.hdr_btn_w;
         const sync_btn_x = lock_btn_x + lock_btn_w + c.L.pad;
 
         if (ui.inRect(c.mx, c.my, sync_btn_x, bot_btn_y, sync_btn_w, bot_btn_h)) {
@@ -658,26 +705,17 @@ fn inputBrowser(self: *Self, c: Ctx) void {
             self.delete_db_err = null;
             self.sync_err = null;
             self.sync_from_browser = true;
-            self.delete_confirm_pending = false;
+            self.delete_confirm.reset();
             self.phase = .sync_setup;
         } else if (ui.inRect(c.mx, c.my, lock_btn_x, bot_btn_y, lock_btn_w, bot_btn_h)) {
-            if (self.db) |*d| d.deinit();
-            self.db = null;
-            for (self.rows.items) |r| r.deinit(self.allocator);
-            self.rows.clearRetainingCapacity();
-            if (self.detail_entry) |e| e.deinit(self.allocator);
-            self.detail_entry = null;
-            self.unlock_pw = .{ .masked = true };
-            self.unlock_err = null;
-            self.unlock_dialog_shown = false;
-            self.phase = .unlock;
+            self.lock();
         } else if (!is_searching and self.browser_path_len > 0 and
-            ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h))
+            ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h))
         {
             // "< Back" tap — navigate up
             self.navigateUp();
         } else if (ui.inRect(c.mx, c.my, fab_x, fab_y, fab_size, fab_size)) {
-            for (0..7) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.EDIT_PW_IDX };
+            for (0..ui.field_count) |fi| self.edit_fields[fi] = .{ .masked = fi == ui.PW_IDX };
             self.edit_is_new = true;
             self.edit_show_pw = false;
             self.edit_pending = null;
@@ -715,23 +753,11 @@ fn inputBrowser(self: *Self, c: Ctx) void {
                     const cur_path = self.browserPath();
                     var visible_i: i32 = 0;
                     var handled = false;
-                    var seen_dirs2: [256][]const u8 = undefined;
-                    var seen_dirs2_len: usize = 0;
+                    var seen2: SeenDirs = .{};
                     // First pass: subdirectories (in order of first appearance)
                     for (self.rows.items) |row| {
                         if (subdirName(row.path, cur_path)) |dn| {
-                            var already = false;
-                            for (seen_dirs2[0..seen_dirs2_len]) |s| {
-                                if (std.mem.eql(u8, s, dn)) {
-                                    already = true;
-                                    break;
-                                }
-                            }
-                            if (!already) {
-                                if (seen_dirs2_len < 256) {
-                                    seen_dirs2[seen_dirs2_len] = dn;
-                                    seen_dirs2_len += 1;
-                                }
+                            if (seen2.add(dn)) {
                                 if (visible_i == idx_i) {
                                     self.navigateInto(dn);
                                     handled = true;
@@ -781,8 +807,8 @@ fn inputDetail(self: *Self, c: Ctx) void {
     const hist_btn_h = c.L.btn_h;
     const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
     if (c.is_tap) {
-        if (ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
-            self.detail_delete_confirm_pending = false;
+        if (ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
+            self.detail_delete_confirm.reset();
             self.phase = .browser;
         } else if (ui.inRect(c.mx, c.my, c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h)) {
             // "View History" — build chain and enter history phase.
@@ -791,13 +817,13 @@ fn inputDetail(self: *Self, c: Ctx) void {
             self.hist_scroll = 0;
             self.loadHistory(self.detail_head_hash);
             self.phase = .history;
-        } else if (ui.inRect(c.mx, c.my, c.sw - @divTrunc(c.sw, 3), 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
+        } else if (ui.inRect(c.mx, c.my, c.sw - c.L.back_btn_w, 0, c.L.back_btn_w, c.L.hdr_h)) {
             if (self.detail_entry) |e| {
-                const vals = [7][]const u8{
+                const vals = [ui.field_count][]const u8{
                     e.title, e.path, e.description, e.url, e.username, e.password, e.notes,
                 };
-                for (0..7) |fi| {
-                    self.edit_fields[fi] = .{ .masked = fi == ui.EDIT_PW_IDX };
+                for (0..ui.field_count) |fi| {
+                    self.edit_fields[fi] = .{ .masked = fi == ui.PW_IDX };
                     self.edit_fields[fi].setDefault(vals[fi]);
                 }
             }
@@ -810,7 +836,7 @@ fn inputDetail(self: *Self, c: Ctx) void {
             self.edit_notes_scroll = 0;
             self.phase = .edit;
         } else if (ui.inRect(c.mx, c.my, c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h)) {
-            if (self.detail_delete_confirm_pending) {
+            if (self.detail_delete_confirm.pending) {
                 if (self.db) |*d| {
                     d.deleteEntry(self.detail_entry_id) catch {};
                     d.save() catch {};
@@ -818,15 +844,14 @@ fn inputDetail(self: *Self, c: Ctx) void {
                 }
                 if (self.detail_entry) |e| e.deinit(self.allocator);
                 self.detail_entry = null;
-                self.detail_delete_confirm_pending = false;
+                self.detail_delete_confirm.reset();
                 self.phase = .browser;
             } else {
-                self.detail_delete_confirm_pending = true;
-                self.detail_delete_confirm_timer = 3.0;
+                self.detail_delete_confirm.arm();
             }
         } else {
             const scroll_i: i32 = @intFromFloat(self.detail_scroll);
-            const toggle_w = @divTrunc(c.sw, 5);
+            const toggle_w = c.L.toggle_w;
             const pw_row_y = c.L.hdr_h + c.L.pad + ui.DETAIL_PW_IDX * c.L.detail_row_h - scroll_i;
             if (ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
                 self.detail_show_pw = !self.detail_show_pw;
@@ -834,10 +859,10 @@ fn inputDetail(self: *Self, c: Ctx) void {
                 c.my < @as(f32, @floatFromInt(del_btn_y)))
             {
                 if (self.detail_entry) |e| {
-                    const vals = [7][]const u8{
+                    const vals = [ui.field_count][]const u8{
                         e.title, e.path, e.description, e.url, e.username, e.password, e.notes,
                     };
-                    for (0..7) |fi| {
+                    for (0..ui.field_count) |fi| {
                         const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
                         if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
                             var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
@@ -899,8 +924,8 @@ fn inputEdit(self: *Self, c: Ctx) void {
         }
         if (c.is_tap and self.edit_pending == null) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
-            const btn_w = @divTrunc(c.sw, 5);
-            for (0..7) |fi| {
+            const btn_w = c.L.toggle_w;
+            for (0..ui.field_count) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
                 if (fy >= c.L.hdr_h and ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
@@ -929,7 +954,7 @@ fn inputEdit(self: *Self, c: Ctx) void {
             }
         }
     } else {
-        if (rl.isKeyPressed(.tab)) self.edit_focus = (self.edit_focus + 1) % 7;
+        if (rl.isKeyPressed(.tab)) self.edit_focus = (self.edit_focus + 1) % ui.field_count;
         if (rl.isKeyPressed(.backspace)) self.edit_fields[self.edit_focus].pop();
         // Enter: insert newline when Notes is focused, otherwise handled as save below
         if (enter_pressed and self.edit_focus == ui.EDIT_NOTES_IDX) {
@@ -950,8 +975,8 @@ fn inputEdit(self: *Self, c: Ctx) void {
         }
         if (c.is_tap) {
             const scroll_i: i32 = @intFromFloat(self.edit_scroll);
-            const btn_w = @divTrunc(c.sw, 5);
-            for (0..7) |fi| {
+            const btn_w = c.L.toggle_w;
+            for (0..ui.field_count) |fi| {
                 const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
                 const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
                 if (ui.inRect(c.mx, c.my, 0, fy, c.sw, row_h)) {
@@ -988,7 +1013,7 @@ fn inputEdit(self: *Self, c: Ctx) void {
     );
 
     // Cancel / Save (both platforms)
-    const hdr_btn_w = @divTrunc(c.sw, 4);
+    const hdr_btn_w = c.L.hdr_btn_w;
     if (c.is_tap and ui.inRect(c.mx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
         self.edit_err = null;
         self.phase = .detail;
@@ -1006,13 +1031,13 @@ fn doSave(self: *Self) void {
     };
     const new_entry = loki.Entry{
         .parent_hash = if (self.edit_is_new) null else self.detail_head_hash,
-        .title = self.edit_fields[0].slice(),
-        .path = self.edit_fields[1].slice(),
-        .description = self.edit_fields[2].slice(),
-        .url = self.edit_fields[3].slice(),
-        .username = self.edit_fields[4].slice(),
-        .password = self.edit_fields[5].slice(),
-        .notes = self.edit_fields[6].slice(),
+        .title = self.edit_fields[ui.TITLE_IDX].slice(),
+        .path = self.edit_fields[ui.PATH_IDX].slice(),
+        .description = self.edit_fields[ui.DESC_IDX].slice(),
+        .url = self.edit_fields[ui.URL_IDX].slice(),
+        .username = self.edit_fields[ui.USERNAME_IDX].slice(),
+        .password = self.edit_fields[ui.PW_IDX].slice(),
+        .notes = self.edit_fields[ui.NOTES_IDX].slice(),
     };
     if (self.edit_is_new) {
         _ = d.createEntry(new_entry) catch {
@@ -1107,7 +1132,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
     }
 
     if (c.is_tap) {
-        const hdr_btn_w = @divTrunc(c.sw, 4);
+        const hdr_btn_w = c.L.hdr_btn_w;
         const btn_h = c.L.btn_h;
         const bar_y = c.sh - btn_h - c.L.pad;
         const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
@@ -1148,7 +1173,7 @@ fn inputHistory(self: *Self, c: Ctx) void {
         // Show/Hide password toggle.
         const entry = self.hist_entry orelse return;
         const scroll_i: i32 = @intFromFloat(self.hist_scroll);
-        const toggle_w = @divTrunc(c.sw, 5);
+        const toggle_w = c.L.toggle_w;
         const pw_row_y = c.L.hdr_h + c.L.pad + ui.DETAIL_PW_IDX * c.L.detail_row_h - scroll_i;
         if (ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
             self.hist_show_pw = !self.hist_show_pw;
@@ -1156,12 +1181,12 @@ fn inputHistory(self: *Self, c: Ctx) void {
         }
 
         // Tap any field row to copy value.
-        const vals = [7][]const u8{
+        const vals = [ui.field_count][]const u8{
             entry.title, entry.path,     entry.description,
             entry.url,   entry.username, entry.password,
             entry.notes,
         };
-        for (0..7) |fi| {
+        for (0..ui.field_count) |fi| {
             const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
             if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
                 var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
@@ -1212,7 +1237,7 @@ fn copyHistEntryToNew(self: *Self) void {
     self.detail_head_hash = new_id; // genesis: head == entry_id
     self.detail_show_pw = false;
     self.detail_scroll = 0;
-    self.detail_delete_confirm_pending = false;
+    self.detail_delete_confirm.reset();
     self.phase = .detail;
 }
 
@@ -1220,54 +1245,11 @@ fn copyHistEntryToNew(self: *Self) void {
 // PASSWORD GENERATOR OVERLAY
 // ============================================================
 
-const PWGEN_CHARS_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const PWGEN_CHARS_LOWER = "abcdefghijklmnopqrstuvwxyz";
-const PWGEN_CHARS_DIGITS = "0123456789";
-const PWGEN_CHARS_SYMBOLS = "!@#$%^&*()-_=+[]{}|;:',.<>?/`~";
-const PWGEN_MIN_LEN: u8 = 8;
-const PWGEN_MAX_LEN: u8 = 128;
-
 /// Regenerate the preview password from the current generator settings.
 fn pwgenRegenerate(self: *Self) void {
-    // Build pool from enabled character sets.
-    var pool: [256]u8 = undefined;
-    var pool_len: usize = 0;
-    if (self.pwgen_upper) {
-        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_UPPER.len], PWGEN_CHARS_UPPER);
-        pool_len += PWGEN_CHARS_UPPER.len;
-    }
-    if (self.pwgen_lower) {
-        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_LOWER.len], PWGEN_CHARS_LOWER);
-        pool_len += PWGEN_CHARS_LOWER.len;
-    }
-    if (self.pwgen_digits) {
-        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_DIGITS.len], PWGEN_CHARS_DIGITS);
-        pool_len += PWGEN_CHARS_DIGITS.len;
-    }
-    if (self.pwgen_symbols) {
-        @memcpy(pool[pool_len .. pool_len + PWGEN_CHARS_SYMBOLS.len], PWGEN_CHARS_SYMBOLS);
-        pool_len += PWGEN_CHARS_SYMBOLS.len;
-    }
-    // Fallback: if nothing enabled use lowercase.
-    if (pool_len == 0) {
-        @memcpy(pool[0..PWGEN_CHARS_LOWER.len], PWGEN_CHARS_LOWER);
-        pool_len = PWGEN_CHARS_LOWER.len;
-    }
-
-    // Seed a fresh PRNG from the OS.
-    var seed: u64 = undefined;
-    std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-        seed = @bitCast(std.time.milliTimestamp());
-    };
-    var rng = std.Random.DefaultPrng.init(seed);
-    const rand = rng.random();
-
-    const len: usize = @intCast(self.pwgen_length);
-    for (0..len) |i| {
-        self.pwgen_preview[i] = pool[rand.uintLessThan(usize, pool_len)];
-    }
-    self.pwgen_preview[len] = 0;
-    self.pwgen_preview_len = len;
+    const result = loki.generator.generate(self.pwgen_opts, self.pwgen_preview[0..self.pwgen_opts.length]);
+    self.pwgen_preview_len = result.len;
+    self.pwgen_preview[result.len] = 0;
 }
 
 /// Accept the generated password: write it into the password edit field and close.
@@ -1305,15 +1287,15 @@ fn inputPwGen(self: *Self, c: Ctx) void {
             return;
         }
         if (rl.isKeyPressed(.left) or rl.isKeyPressed(.minus)) {
-            if (self.pwgen_length > PWGEN_MIN_LEN) {
-                self.pwgen_length -= 1;
+            if (self.pwgen_opts.length > loki.generator.MIN_LENGTH) {
+                self.pwgen_opts.length -= 1;
                 self.pwgenRegenerate();
             }
             return;
         }
         if (rl.isKeyPressed(.right) or rl.isKeyPressed(.equal)) {
-            if (self.pwgen_length < PWGEN_MAX_LEN) {
-                self.pwgen_length += 1;
+            if (self.pwgen_opts.length < loki.generator.MAX_LENGTH) {
+                self.pwgen_opts.length += 1;
                 self.pwgenRegenerate();
             }
             return;
@@ -1338,14 +1320,14 @@ fn inputPwGen(self: *Self, c: Ctx) void {
         const mid_x = card_x + @divTrunc(card_w, 2);
         if (c.mx < @as(f32, @floatFromInt(mid_x))) {
             // Left half → decrement
-            if (self.pwgen_length > PWGEN_MIN_LEN) {
-                self.pwgen_length -= 1;
+            if (self.pwgen_opts.length > loki.generator.MIN_LENGTH) {
+                self.pwgen_opts.length -= 1;
                 self.pwgenRegenerate();
             }
         } else {
             // Right half → increment
-            if (self.pwgen_length < PWGEN_MAX_LEN) {
-                self.pwgen_length += 1;
+            if (self.pwgen_opts.length < loki.generator.MAX_LENGTH) {
+                self.pwgen_opts.length += 1;
                 self.pwgenRegenerate();
             }
         }
@@ -1354,10 +1336,10 @@ fn inputPwGen(self: *Self, c: Ctx) void {
 
     // Rows 1–4: checkbox toggles.
     const checkboxes = [4]struct { y: i32, field: *bool }{
-        .{ .y = content_y + 1 * row_stride, .field = &self.pwgen_upper },
-        .{ .y = content_y + 2 * row_stride, .field = &self.pwgen_lower },
-        .{ .y = content_y + 3 * row_stride, .field = &self.pwgen_digits },
-        .{ .y = content_y + 4 * row_stride, .field = &self.pwgen_symbols },
+        .{ .y = content_y + 1 * row_stride, .field = &self.pwgen_opts.use_upper },
+        .{ .y = content_y + 2 * row_stride, .field = &self.pwgen_opts.use_lower },
+        .{ .y = content_y + 3 * row_stride, .field = &self.pwgen_opts.use_digits },
+        .{ .y = content_y + 4 * row_stride, .field = &self.pwgen_opts.use_symbols },
     };
     for (checkboxes) |cb| {
         if (ui.inRect(c.mx, c.my, card_x, cb.y, card_w, row_h)) {
@@ -1426,17 +1408,17 @@ fn drawPwGen(self: *Self, c: Ctx) void {
         ui.drawButton("+", inner_x + dec_w + mid_w, ry, inc_w, row_h, .{ .r = 50, .g = 60, .b = 90, .a = 255 });
         // Centre label
         var lbuf: [16:0]u8 = std.mem.zeroes([16:0]u8);
-        _ = std.fmt.bufPrintZ(&lbuf, "Length: {d}", .{self.pwgen_length}) catch {};
+        _ = std.fmt.bufPrintZ(&lbuf, "Length: {d}", .{self.pwgen_opts.length}) catch {};
         const ltw = rl.measureText(&lbuf, c.L.fs_body);
         rl.drawText(&lbuf, inner_x + dec_w + @divTrunc(mid_w - ltw, 2), ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
     }
 
     // Rows 1–4: checkboxes.
     const checkbox_rows = [4]struct { label: [:0]const u8, val: bool }{
-        .{ .label = "Uppercase (A-Z)", .val = self.pwgen_upper },
-        .{ .label = "Lowercase (a-z)", .val = self.pwgen_lower },
-        .{ .label = "Digits (0-9)", .val = self.pwgen_digits },
-        .{ .label = "Symbols (!@#…)", .val = self.pwgen_symbols },
+        .{ .label = "Uppercase (A-Z)", .val = self.pwgen_opts.use_upper },
+        .{ .label = "Lowercase (a-z)", .val = self.pwgen_opts.use_lower },
+        .{ .label = "Digits (0-9)", .val = self.pwgen_opts.use_digits },
+        .{ .label = "Symbols (!@#…)", .val = self.pwgen_opts.use_symbols },
     };
     for (checkbox_rows, 0..) |row, i| {
         const ry = content_y + @as(i32, @intCast(i + 1)) * row_stride;
@@ -1513,12 +1495,12 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const title_y = form_top;
     const sub_y = title_y + c.L.fs_hdr + c.L.pad;
     const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
-    const ip_field_y = ip_label_y + c.L.fs_label + 6;
+    const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
-    const pw_field_y = pw_label_y + c.L.fs_label + 6;
+    const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
 
-    if (self.sync_from_browser and c.is_tap and ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
+    if (self.sync_from_browser and c.is_tap and ui.inRect(c.mx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) {
         self.sync_from_browser = false;
         self.phase = .browser;
     }
@@ -1655,7 +1637,8 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
     const status = sync.g_status.load(.acquire);
     if (status == .done) {
         if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h)) {
-            self.unlock_pw = .{ .masked = true };
+            self.unlock_pw.zeroAndClear();
+            self.unlock_pw.masked = true;
             self.unlock_err = null;
             self.unlock_dialog_shown = false;
             self.phase = .unlock;
@@ -1708,7 +1691,7 @@ fn drawUnlock(self: *Self, c: Ctx) void {
 
     // Delete DB button at bottom
     const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
-    if (self.delete_confirm_pending) {
+    if (self.delete_confirm.pending) {
         ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
         ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
@@ -1730,8 +1713,7 @@ fn drawUnlock(self: *Self, c: Ctx) void {
 
         // Biometric status / error message.
         if (self.bio_err) |msg| {
-            const is_info = msg[0] == 'B'; // "Biometric unlock enabled." starts with B
-            const color: rl.Color = if (is_info)
+            const color: rl.Color = if (self.bio_err_is_info)
                 .{ .r = 80, .g = 200, .b = 120, .a = 255 }
             else
                 .orange;
@@ -1787,22 +1769,10 @@ fn drawBrowser(self: *Self, c: Ctx) void {
         const cur_path = self.browserPath();
 
         // First pass: immediate subdirectories (in stable first-appearance order)
-        var seen_dirs: [256][]const u8 = undefined;
-        var seen_dirs_len: usize = 0;
+        var seen_draw: SeenDirs = .{};
         for (self.rows.items) |row| {
             const dn = subdirName(row.path, cur_path) orelse continue;
-            var already = false;
-            for (seen_dirs[0..seen_dirs_len]) |s| {
-                if (std.mem.eql(u8, s, dn)) {
-                    already = true;
-                    break;
-                }
-            }
-            if (already) continue;
-            if (seen_dirs_len < 256) {
-                seen_dirs[seen_dirs_len] = dn;
-                seen_dirs_len += 1;
-            }
+            if (!seen_draw.add(dn)) continue;
 
             any_visible = true;
             const row_y = list_top + draw_idx * c.L.row_h -
@@ -1875,28 +1845,44 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     }
 
     // Bottom bar: Lock + Sync (left), "+" FAB (right)
-    const fab_size = @divTrunc(c.sw, 7);
+    const fab_size = c.L.fab_size;
     const fab_x = c.sw - fab_size - c.L.pad;
     const fab_y = c.sh - fab_size - c.L.pad;
-    const lock_btn_w = @divTrunc(c.sw, 4);
-    const sync_btn_w = @divTrunc(c.sw, 4);
+    const lock_btn_w = c.L.hdr_btn_w;
+    const sync_btn_w = c.L.hdr_btn_w;
     ui.drawButton("Lock", c.L.pad, fab_y, lock_btn_w, fab_size, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
     ui.drawButton("Sync", c.L.pad + lock_btn_w + c.L.pad, fab_y, sync_btn_w, fab_size, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
     ui.drawButton("+", fab_x, fab_y, fab_size, fab_size, .{ .r = 0, .g = 135, .b = 190, .a = 255 });
+
+    // Browser toast (e.g. biometric enroll result).
+    if (self.browser_toast) |msg| {
+        const tw = rl.measureText(msg, c.L.fs_label);
+        const tpad = c.L.pad;
+        const tw2 = tw + tpad * 2;
+        const th = c.L.fs_label + tpad;
+        const tx = @divTrunc(c.sw - tw2, 2);
+        const ty = fab_y - th - @divTrunc(c.L.pad, 2);
+        rl.drawRectangle(tx, ty, tw2, th, .{ .r = 30, .g = 80, .b = 50, .a = 230 });
+        rl.drawText(msg, tx + tpad, ty + @divTrunc(tpad, 2), c.L.fs_label, .white);
+    }
 }
 
-fn drawDetail(self: *Self, c: Ctx) void {
-    const entry = self.detail_entry orelse {
-        rl.drawText("No entry loaded.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
-        return;
-    };
-
-    const scroll_i: i32 = @intFromFloat(self.detail_scroll);
+/// Draw the 7 entry fields (shared by drawDetail and drawHistory).
+/// `show_pw` controls whether the Password field is revealed.
+/// `bottom_clip_y` is the y coordinate below which rows should not be drawn
+/// (used to avoid overdrawing pinned buttons at the bottom).
+fn drawEntryFields(
+    entry: loki.Entry,
+    show_pw: bool,
+    scroll_i: i32,
+    bottom_clip_y: i32,
+    c: Ctx,
+) void {
     const val_x = c.L.label_w + c.L.pad;
-    const toggle_w = @divTrunc(c.sw, 5);
+    const toggle_w = c.L.toggle_w;
 
     const Field = struct { label: []const u8, value: []const u8 };
-    const fields = [_]Field{
+    const fields = [ui.field_count]Field{
         .{ .label = "Title", .value = entry.title },
         .{ .label = "Path", .value = entry.path },
         .{ .label = "Desc", .value = entry.description },
@@ -1909,21 +1895,21 @@ fn drawDetail(self: *Self, c: Ctx) void {
     for (fields, 0..) |f, fi| {
         const is_notes = fi == fields.len - 1;
         const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-        if (fy + c.L.detail_row_h < c.L.hdr_h or fy > c.sh) continue;
+        if (fy + c.L.detail_row_h < c.L.hdr_h or fy > bottom_clip_y) continue;
 
         const bg: rl.Color = if (fi % 2 == 0)
             .{ .r = 18, .g = 18, .b = 28, .a = 255 }
         else
             .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-        const draw_h = if (is_notes) @max(c.L.detail_row_h, c.sh - fy) else c.L.detail_row_h;
+        const draw_h = if (is_notes) @max(c.L.detail_row_h, bottom_clip_y - fy) else c.L.detail_row_h;
         rl.drawRectangle(0, fy, c.sw, draw_h, bg);
 
         ui.drawSlice(f.label, c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
 
         const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
-        const is_pw = fi == ui.DETAIL_PW_IDX;
+        const is_pw = fi == ui.PW_IDX;
 
-        if (is_pw and !self.detail_show_pw) {
+        if (is_pw and !show_pw) {
             var stars: [64:0]u8 = undefined;
             const n = @min(f.value.len, 63);
             @memset(stars[0..n], '*');
@@ -1937,17 +1923,28 @@ fn drawDetail(self: *Self, c: Ctx) void {
 
         if (is_pw) {
             const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
-            const toggle_label: [:0]const u8 = if (self.detail_show_pw) "Hide" else "Show";
+            const toggle_label: [:0]const u8 = if (show_pw) "Hide" else "Show";
             ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
         }
 
         if (!is_notes) rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
     }
+}
+
+fn drawDetail(self: *Self, c: Ctx) void {
+    const entry = self.detail_entry orelse {
+        rl.drawText("No entry loaded.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        return;
+    };
+
+    const scroll_i: i32 = @intFromFloat(self.detail_scroll);
 
     // Delete button (pinned bottom)
     const del_btn_h = c.L.btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
-    if (self.detail_delete_confirm_pending) {
+
+    drawEntryFields(entry, self.detail_show_pw, scroll_i, del_btn_y, c);
+    if (self.detail_delete_confirm.pending) {
         ui.drawButton("Tap again to confirm delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 220, .g = 30, .b = 30, .a = 255 });
     } else {
         ui.drawButton("Delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
@@ -1987,7 +1984,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
     const val_x = c.L.label_w + c.L.pad;
     const notes_h = c.L.detail_row_h * 4;
 
-    for (0..7) |fi| {
+    for (0..ui.field_count) |fi| {
         const row_h = if (fi == ui.EDIT_NOTES_IDX) notes_h else c.L.detail_row_h;
         const fy = c.L.hdr_h + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
         if (fy + row_h <= c.L.hdr_h or fy > c.sh) continue;
@@ -2064,7 +2061,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
                 }
 
                 if (is_pw_field) {
-                    const btn_w = @divTrunc(c.sw, 5);
+                    const btn_w = c.L.toggle_w;
                     const btn_h2 = @divTrunc(c.L.detail_row_h * 2, 3);
                     const btn_y2 = fy + @divTrunc(c.L.detail_row_h - btn_h2, 2);
                     // Show/Hide toggle (rightmost)
@@ -2092,7 +2089,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
     }
 
     // Header (drawn last)
-    const hdr_btn_w = @divTrunc(c.sw, 4);
+    const hdr_btn_w = c.L.hdr_btn_w;
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
     rl.drawText("Cancel", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     const save_tw = rl.measureText("Save", c.L.fs_body);
@@ -2113,62 +2110,12 @@ fn drawHistory(self: *Self, c: Ctx) void {
     };
 
     const scroll_i: i32 = @intFromFloat(self.hist_scroll);
-    const val_x = c.L.label_w + c.L.pad;
-    const toggle_w = @divTrunc(c.sw, 5);
 
     // Bottom button bar.
     const btn_h = c.L.btn_h;
     const bar_y = c.sh - btn_h - c.L.pad;
 
-    // Draw fields (same style as drawDetail).
-    const Field = struct { label: []const u8, value: []const u8 };
-    const fields = [_]Field{
-        .{ .label = "Title", .value = entry.title },
-        .{ .label = "Path", .value = entry.path },
-        .{ .label = "Desc", .value = entry.description },
-        .{ .label = "URL", .value = entry.url },
-        .{ .label = "Username", .value = entry.username },
-        .{ .label = "Password", .value = entry.password },
-        .{ .label = "Notes", .value = entry.notes },
-    };
-
-    for (fields, 0..) |f, fi| {
-        const is_notes = fi == fields.len - 1;
-        const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
-        if (fy + c.L.detail_row_h < c.L.hdr_h or fy > c.sh) continue;
-
-        const bg: rl.Color = if (fi % 2 == 0)
-            .{ .r = 18, .g = 18, .b = 28, .a = 255 }
-        else
-            .{ .r = 26, .g = 26, .b = 38, .a = 255 };
-        const draw_h = if (is_notes) @max(c.L.detail_row_h, c.sh - fy) else c.L.detail_row_h;
-        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
-
-        ui.drawSlice(f.label, c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
-
-        const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
-        const is_pw = fi == ui.DETAIL_PW_IDX;
-
-        if (is_pw and !self.hist_show_pw) {
-            var stars: [64:0]u8 = undefined;
-            const n = @min(f.value.len, 63);
-            @memset(stars[0..n], '*');
-            stars[n] = 0;
-            rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
-        } else if (is_pw) {
-            ui.drawSlice(f.value, val_x, val_y, c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
-        } else {
-            ui.drawSlice(f.value, val_x, val_y, c.L.fs_body, .white);
-        }
-
-        if (is_pw) {
-            const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
-            const toggle_label: [:0]const u8 = if (self.hist_show_pw) "Hide" else "Show";
-            ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
-        }
-
-        if (!is_notes) rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
-    }
+    drawEntryFields(entry, self.hist_show_pw, scroll_i, bar_y, c);
 
     // "Copied!" toast
     if (self.copy_feedback_timer > 0) {
@@ -2227,9 +2174,9 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     const title_y = form_top;
     const sub_y = title_y + c.L.fs_hdr + c.L.pad;
     const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
-    const ip_field_y = ip_label_y + c.L.fs_label + 6;
+    const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
-    const pw_field_y = pw_label_y + c.L.fs_label + 6;
+    const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
     const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
 

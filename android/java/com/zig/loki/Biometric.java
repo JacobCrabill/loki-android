@@ -14,7 +14,7 @@ import java.io.FileOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
-import java.util.concurrent.Executor;
+
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
@@ -288,7 +288,7 @@ public class Biometric {
     }
 
     private static File blobFile(Activity activity) {
-        return new File(activity.getFilesDir(), "loki_biometric");
+        return new File(activity.getFilesDir(), BLOB_FILENAME);
     }
 
     // -----------------------------------------------------------------------
