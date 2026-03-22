@@ -3,11 +3,15 @@ const builtin = @import("builtin");
 const android = @import("android");
 const rl = @import("raylib");
 const App = @import("App.zig");
+const font = @import("font.zig");
 
 pub fn main() !void {
     rl.initWindow(720, 1280, "Loki");
     defer rl.closeWindow();
     rl.setTargetFPS(60);
+
+    font.load();
+    defer font.unload();
 
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     defer _ = gpa.deinit();

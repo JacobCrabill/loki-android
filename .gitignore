@@ -1,3 +1,6 @@
 .zig-cache/
 zig-pkg/
 zig-out/
+
+# Ignore the assets folder by default; we'll force-add files when needed.
+src/assets/

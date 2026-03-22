@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const android = @import("android");
 const rl = @import("raylib");
+const font = @import("font.zig");
 
 pub const is_android = builtin.abi.isAndroid();
 
@@ -186,6 +187,30 @@ pub fn fsByHeight(h: i32) i32 {
     return @max(12, @divTrunc(h * 11, 20));
 }
 
+/// Draw a null-terminated string using the custom font.
+/// Drop-in replacement for rl.drawText with identical integer coordinates/size.
+pub fn drawText(text: [:0]const u8, x: i32, y: i32, fs: i32, color: rl.Color) void {
+    rl.drawTextEx(
+        font.regular,
+        text,
+        .{ .x = @floatFromInt(x), .y = @floatFromInt(y) },
+        @floatFromInt(fs),
+        font.SPACING,
+        color,
+    );
+}
+
+/// Measure the pixel width of a string using the custom font.
+/// Drop-in replacement for rl.measureText returning i32.
+pub fn measureText(text: [:0]const u8, fs: i32) i32 {
+    return @intFromFloat(rl.measureTextEx(
+        font.regular,
+        text,
+        @floatFromInt(fs),
+        font.SPACING,
+    ).x);
+}
+
 pub fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: bool, err: bool) void {
     rl.drawRectangle(x, y, w, h, if (focused) .white else .light_gray);
     const border: rl.Color = if (err) .{ .r = 220, .g = 50, .b = 50, .a = 255 } else if (focused) .sky_blue else .gray;
@@ -200,10 +225,10 @@ pub fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focuse
 
     const fs = fsByHeight(h);
     const pad = @max(6, @divTrunc(h, 8));
-    rl.drawText(&disp, x + pad, y + @divTrunc(h - fs, 2), fs, .dark_gray);
+    drawText(&disp, x + pad, y + @divTrunc(h - fs, 2), fs, .dark_gray);
 
     if (focused) {
-        const tw = rl.measureText(&disp, fs);
+        const tw = measureText(&disp, fs);
         rl.drawRectangle(x + pad + tw, y + @divTrunc(h, 6), 2, @divTrunc(h * 2, 3), .sky_blue);
     }
 }
@@ -220,14 +245,14 @@ pub fn drawSlice(text: []const u8, x: i32, y: i32, fs: i32, color: rl.Color) voi
     const n = @min(text.len, 511);
     @memcpy(buf[0..n], text[0..n]);
     buf[n] = 0;
-    rl.drawText(&buf, x, y, fs, color);
+    drawText(&buf, x, y, fs, color);
 }
 
 pub fn drawButton(label: [:0]const u8, x: i32, y: i32, w: i32, h: i32, color: rl.Color) void {
     rl.drawRectangle(x, y, w, h, color);
     const fs = fsByHeight(h);
-    const tw = rl.measureText(label, fs);
-    rl.drawText(label, x + @divTrunc(w - tw, 2), y + @divTrunc(h - fs, 2), fs, .white);
+    const tw = measureText(label, fs);
+    drawText(label, x + @divTrunc(w - tw, 2), y + @divTrunc(h - fs, 2), fs, .white);
 }
 
 // ---- Search helpers ----

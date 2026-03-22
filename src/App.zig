@@ -1389,8 +1389,8 @@ fn drawPwGen(self: *Self, c: Ctx) void {
 
     // Title.
     const title = "Generate Password";
-    const title_tw = rl.measureText(title, c.L.fs_hdr);
-    rl.drawText(title, card_x + @divTrunc(card_w - title_tw, 2), card_y + c.L.pad, c.L.fs_hdr, .white);
+    const title_tw = ui.measureText(title, c.L.fs_hdr);
+    ui.drawText(title, card_x + @divTrunc(card_w - title_tw, 2), card_y + c.L.pad, c.L.fs_hdr, .white);
 
     const content_y = card_y + c.L.pad + c.L.fs_hdr + c.L.pad;
     const row_stride = row_h + @divTrunc(c.L.pad, 2);
@@ -1409,8 +1409,8 @@ fn drawPwGen(self: *Self, c: Ctx) void {
         // Centre label
         var lbuf: [16:0]u8 = std.mem.zeroes([16:0]u8);
         _ = std.fmt.bufPrintZ(&lbuf, "Length: {d}", .{self.pwgen_opts.length}) catch {};
-        const ltw = rl.measureText(&lbuf, c.L.fs_body);
-        rl.drawText(&lbuf, inner_x + dec_w + @divTrunc(mid_w - ltw, 2), ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
+        const ltw = ui.measureText(&lbuf, c.L.fs_body);
+        ui.drawText(&lbuf, inner_x + dec_w + @divTrunc(mid_w - ltw, 2), ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
     }
 
     // Rows 1–4: checkboxes.
@@ -1438,7 +1438,7 @@ fn drawPwGen(self: *Self, c: Ctx) void {
             rl.drawRectangle(box_x + 2, box_y + 2, box_size - 4, box_size - 4, .{ .r = 60, .g = 200, .b = 100, .a = 255 });
         }
         const label_x = inner_x + box_size + @divTrunc(c.L.pad, 2);
-        rl.drawText(row.label, label_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
+        ui.drawText(row.label, label_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .white);
     }
 
     // Row 5: preview (tap to regenerate).
@@ -1449,10 +1449,10 @@ fn drawPwGen(self: *Self, c: Ctx) void {
         // Show preview (masked stars if password mode, but for generation show it plainly
         // so the user can verify what they're getting).
         const prev_cstr: *const [129:0]u8 = @ptrCast(&self.pwgen_preview);
-        const ptw = rl.measureText(prev_cstr, c.L.fs_body);
+        const ptw = ui.measureText(prev_cstr, c.L.fs_body);
         const avail = inner_w - c.L.pad;
         if (ptw <= avail) {
-            rl.drawText(prev_cstr, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
+            ui.drawText(prev_cstr, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
         } else {
             // Too wide: show as many chars as fit from the right (most unique end).
             var n: usize = self.pwgen_preview_len;
@@ -1460,15 +1460,15 @@ fn drawPwGen(self: *Self, c: Ctx) void {
                 n -= 1;
                 var tbuf: [129:0]u8 = std.mem.zeroes([129:0]u8);
                 @memcpy(tbuf[0..n], self.pwgen_preview[self.pwgen_preview_len - n ..][0..n]);
-                if (rl.measureText(&tbuf, c.L.fs_body) <= avail) {
-                    rl.drawText(&tbuf, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
+                if (ui.measureText(&tbuf, c.L.fs_body) <= avail) {
+                    ui.drawText(&tbuf, inner_x, ry + @divTrunc(row_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
                     break;
                 }
             }
         }
         // "↻" regen hint on right side.
         const regen_hint = "Tap to regen";
-        rl.drawText(regen_hint, card_x + card_w - c.L.pad - rl.measureText(regen_hint, c.L.fs_small), ry + @divTrunc(row_h - c.L.fs_small, 2), c.L.fs_small, .gray);
+        ui.drawText(regen_hint, card_x + card_w - c.L.pad - ui.measureText(regen_hint, c.L.fs_small), ry + @divTrunc(row_h - c.L.fs_small, 2), c.L.fs_small, .gray);
     }
 
     // Row 6: Use this password button.
@@ -1485,7 +1485,7 @@ fn drawPwGen(self: *Self, c: Ctx) void {
 
     if (comptime !is_android) {
         const hint = "r: regen  Enter: use  Esc: cancel  ←/→: length";
-        rl.drawText(hint, card_x, card_y + card_h + @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
+        ui.drawText(hint, card_x, card_y + card_h + @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
     }
 }
 
@@ -1667,26 +1667,26 @@ fn inputSyncResult(self: *Self, c: Ctx) void {
 
 fn drawUnlock(self: *Self, c: Ctx) void {
     const title_y = @divTrunc(c.sh, 6);
-    const title_tw = rl.measureText("Loki", c.L.fs_hdr * 2);
-    rl.drawText("Loki", @divTrunc(c.sw - title_tw, 2), title_y, c.L.fs_hdr * 2, .white);
+    const title_tw = ui.measureText("Loki", c.L.fs_hdr * 2);
+    ui.drawText("Loki", @divTrunc(c.sw - title_tw, 2), title_y, c.L.fs_hdr * 2, .white);
 
     const sub = "Enter password to open your database.";
-    const sub_tw = rl.measureText(sub, c.L.fs_label);
-    rl.drawText(sub, @divTrunc(c.sw - sub_tw, 2), title_y + c.L.fs_hdr * 2 + c.L.pad, c.L.fs_label, .gray);
+    const sub_tw = ui.measureText(sub, c.L.fs_label);
+    ui.drawText(sub, @divTrunc(c.sw - sub_tw, 2), title_y + c.L.fs_hdr * 2 + c.L.pad, c.L.fs_label, .gray);
 
     const field_y = @divTrunc(c.sh * 2, 5);
     const fw = c.sw - 2 * c.L.pad;
     ui.drawTextField(&self.unlock_pw, c.L.pad, field_y, fw, c.L.fh, true, false);
 
     if (self.unlock_err) |msg| {
-        const etw = rl.measureText(msg, c.L.fs_label);
-        rl.drawText(msg, @divTrunc(c.sw - etw, 2), field_y + c.L.fh + c.L.pad, c.L.fs_label, .orange);
+        const etw = ui.measureText(msg, c.L.fs_label);
+        ui.drawText(msg, @divTrunc(c.sw - etw, 2), field_y + c.L.fh + c.L.pad, c.L.fs_label, .orange);
     }
 
     if (comptime !is_android) {
         const btn_y = @divTrunc(c.sh * 3, 5);
         ui.drawButton("Open", c.L.pad, btn_y, fw, c.L.btn_h, .{ .r = 30, .g = 140, .b = 200, .a = 255 });
-        rl.drawText("Enter: open", c.L.pad, c.sh - c.L.fs_small * 2 - c.L.pad * 2, c.L.fs_small, .dark_gray);
+        ui.drawText("Enter: open", c.L.pad, c.sh - c.L.fs_small * 2 - c.L.pad * 2, c.L.fs_small, .dark_gray);
     }
 
     // Delete DB button at bottom
@@ -1697,7 +1697,7 @@ fn drawUnlock(self: *Self, c: Ctx) void {
         ui.drawButton("Delete DB", c.L.pad, del_btn_y, fw, c.L.btn_h, .{ .r = 120, .g = 30, .b = 30, .a = 255 });
     }
     if (self.delete_db_err) |msg| {
-        rl.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
+        ui.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
     }
 
     // Biometric button and status (Android only, when enrolled or auth pending).
@@ -1717,12 +1717,12 @@ fn drawUnlock(self: *Self, c: Ctx) void {
                 .{ .r = 80, .g = 200, .b = 120, .a = 255 }
             else
                 .orange;
-            const etw = rl.measureText(msg, c.L.fs_label);
+            const etw = ui.measureText(msg, c.L.fs_label);
             const msg_y = if (self.bio_enrolled or self.bio_auth_pending)
                 bio_btn_y - c.L.fs_label - @divTrunc(c.L.pad, 2)
             else
                 del_btn_y - c.L.fs_label - c.L.pad;
-            rl.drawText(msg, @divTrunc(c.sw - etw, 2), msg_y, c.L.fs_label, color);
+            ui.drawText(msg, @divTrunc(c.sw - etw, 2), msg_y, c.L.fs_label, color);
         }
     }
 }
@@ -1760,7 +1760,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
                 if (row.path.len > 0) {
                     ui.drawSlice(row.path, c.L.pad, text_y + c.L.fs_body + @divTrunc(c.L.pad, 2), c.L.fs_small, .gray);
                 }
-                rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
+                ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2), c.L.fs_body, .dark_gray);
             }
             rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
         }
@@ -1783,9 +1783,9 @@ fn drawBrowser(self: *Self, c: Ctx) void {
             // Directory row — dark blue background, folder icon "▸", sky-blue name
             rl.drawRectangle(0, row_y, c.sw, c.L.row_h, .{ .r = 10, .g = 20, .b = 40, .a = 255 });
             const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
-            rl.drawText("\xe2\x96\xb8", c.L.pad, text_y, c.L.fs_body, .sky_blue); // UTF-8 ▸
+            ui.drawText("\xef\x83\x9a", c.L.pad, text_y, c.L.fs_body, .sky_blue); // U+F0DA fa-caret_right
             ui.drawSlice(dn, c.L.pad + c.L.fs_body + @divTrunc(c.L.pad, 2), text_y, c.L.fs_body, .sky_blue);
-            rl.drawText("/", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .{ .r = 60, .g = 120, .b = 200, .a = 255 });
+            ui.drawText("/", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .{ .r = 60, .g = 120, .b = 200, .a = 255 });
             rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 30, .g = 50, .b = 80, .a = 255 });
         }
 
@@ -1807,7 +1807,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
             if (row_y >= list_top) {
                 const text_y = row_y + @divTrunc(c.L.row_h - c.L.fs_body, 2);
                 ui.drawSlice(row.title, c.L.pad, text_y, c.L.fs_body, .white);
-                rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .dark_gray);
+                ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, text_y, c.L.fs_body, .dark_gray);
             }
             rl.drawRectangle(0, row_y + c.L.row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
         }
@@ -1815,7 +1815,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
 
     if (!any_visible) {
         const msg: [:0]const u8 = if (is_searching) "No results." else "Empty.";
-        rl.drawText(msg, c.L.pad, list_top + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText(msg, c.L.pad, list_top + c.L.pad, c.L.fs_body, .gray);
     }
 
     // Header (drawn last so it covers scrolled content)
@@ -1823,17 +1823,17 @@ fn drawBrowser(self: *Self, c: Ctx) void {
 
     if (!is_searching and self.browser_path_len > 0) {
         // In a subdirectory: show "< Back" and current dir name
-        rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+        ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
         const cur = self.browserPath();
         const last_slash = std.mem.lastIndexOfScalar(u8, cur, '/');
         const dir_name = if (last_slash) |i| cur[i + 1 ..] else cur;
         var dbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
         const dn = @min(dir_name.len, ui.max_field);
         @memcpy(dbuf[0..dn], dir_name[0..dn]);
-        const dtw = rl.measureText(&dbuf, c.L.fs_hdr);
-        rl.drawText(&dbuf, @divTrunc(c.sw - dtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+        const dtw = ui.measureText(&dbuf, c.L.fs_hdr);
+        ui.drawText(&dbuf, @divTrunc(c.sw - dtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
     } else {
-        rl.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
+        ui.drawText("Loki", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_hdr, 2), c.L.fs_hdr, .white);
     }
 
     // Search bar
@@ -1841,7 +1841,7 @@ fn drawBrowser(self: *Self, c: Ctx) void {
     const sf_y = c.L.hdr_h + @divTrunc(c.L.pad, 2);
     ui.drawTextField(&self.search_field, c.L.pad, sf_y, c.sw - 2 * c.L.pad, c.L.fh, self.search_focused or self.search_field.len > 0, false);
     if (self.search_field.len == 0) {
-        rl.drawText("Search...", c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
+        ui.drawText("Search...", c.L.pad + 8, sf_y + @divTrunc(c.L.fh - c.L.fs_label, 2), c.L.fs_label, .gray);
     }
 
     // Bottom bar: Lock + Sync (left), "+" FAB (right)
@@ -1856,14 +1856,14 @@ fn drawBrowser(self: *Self, c: Ctx) void {
 
     // Browser toast (e.g. biometric enroll result).
     if (self.browser_toast) |msg| {
-        const tw = rl.measureText(msg, c.L.fs_label);
+        const tw = ui.measureText(msg, c.L.fs_label);
         const tpad = c.L.pad;
         const tw2 = tw + tpad * 2;
         const th = c.L.fs_label + tpad;
         const tx = @divTrunc(c.sw - tw2, 2);
         const ty = fab_y - th - @divTrunc(c.L.pad, 2);
         rl.drawRectangle(tx, ty, tw2, th, .{ .r = 30, .g = 80, .b = 50, .a = 230 });
-        rl.drawText(msg, tx + tpad, ty + @divTrunc(tpad, 2), c.L.fs_label, .white);
+        ui.drawText(msg, tx + tpad, ty + @divTrunc(tpad, 2), c.L.fs_label, .white);
     }
 }
 
@@ -1914,7 +1914,7 @@ fn drawEntryFields(
             const n = @min(f.value.len, 63);
             @memset(stars[0..n], '*');
             stars[n] = 0;
-            rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
+            ui.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
         } else if (is_pw) {
             ui.drawSlice(f.value, val_x, val_y, c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
         } else {
@@ -1933,7 +1933,7 @@ fn drawEntryFields(
 
 fn drawDetail(self: *Self, c: Ctx) void {
     const entry = self.detail_entry orelse {
-        rl.drawText("No entry loaded.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText("No entry loaded.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
         return;
     };
 
@@ -1958,25 +1958,25 @@ fn drawDetail(self: *Self, c: Ctx) void {
     // "Copied!" toast
     if (self.copy_feedback_timer > 0) {
         const toast = "Copied!";
-        const ttw = rl.measureText(toast, c.L.fs_body);
+        const ttw = ui.measureText(toast, c.L.fs_body);
         const toast_pad = c.L.pad * 2;
         const toast_w = ttw + toast_pad * 2;
         const toast_h = c.L.fs_body + toast_pad;
         const toast_x = @divTrunc(c.sw - toast_w, 2);
         const toast_y = del_btn_y - toast_h - c.L.pad;
         rl.drawRectangle(toast_x, toast_y, toast_w, toast_h, .{ .r = 30, .g = 30, .b = 30, .a = 220 });
-        rl.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
+        ui.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
     }
 
     if (comptime !is_android) {
-        rl.drawText("h: pw  Esc: back", c.L.pad, c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("h: pw  Esc: back", c.L.pad, c.sh - c.L.fs_small - c.L.pad - del_btn_h - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Header (drawn last)
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
-    const edit_lbl_tw = rl.measureText("Edit", c.L.fs_body);
-    rl.drawText("Edit", c.sw - edit_lbl_tw - c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    const edit_lbl_tw = ui.measureText("Edit", c.L.fs_body);
+    ui.drawText("Edit", c.sw - edit_lbl_tw - c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
 }
 
 fn drawEdit(self: *Self, c: Ctx) void {
@@ -2021,9 +2021,9 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     const ln = @min(seg.len, ui.max_field);
                     @memcpy(lbuf[0..ln], seg[0..ln]);
                     cursor_y = ly;
-                    cursor_x = val_x + rl.measureText(&lbuf, notes_fs);
+                    cursor_x = val_x + ui.measureText(&lbuf, notes_fs);
                     if (ly >= text_top - notes_fs and ly < text_bottom) {
-                        rl.drawText(&lbuf, val_x, ly, notes_fs, .white);
+                        ui.drawText(&lbuf, val_x, ly, notes_fs, .white);
                     }
                     if (nl == null) break;
                     seg_start = seg_end + 1;
@@ -2033,7 +2033,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     rl.drawRectangle(cursor_x, cursor_y, 2, notes_fs, .sky_blue);
                 }
                 if (comptime is_android) {
-                    rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
+                    ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, fy + c.L.pad, c.L.fs_body, .dark_gray);
                 }
             } else {
                 ui.drawSlice(ui.edit_field_labels[fi], c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
@@ -2047,9 +2047,9 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     var dbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                     const n = self.edit_fields[fi].len;
                     @memcpy(dbuf[0..n], self.edit_fields[fi].buf[0..n]);
-                    rl.drawText(&dbuf, val_x, val_y, c.L.fs_body, .white);
+                    ui.drawText(&dbuf, val_x, val_y, c.L.fs_body, .white);
                     if (is_focused) {
-                        const tw = rl.measureText(&dbuf, c.L.fs_body);
+                        const tw = ui.measureText(&dbuf, c.L.fs_body);
                         rl.drawRectangle(val_x + tw, val_y, 2, c.L.fs_body, .sky_blue);
                     }
                 } else {
@@ -2057,7 +2057,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
                     const n = @min(self.edit_fields[fi].len, 63);
                     @memset(stars[0..n], '*');
                     stars[n] = 0;
-                    rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
+                    ui.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
                 }
 
                 if (is_pw_field) {
@@ -2076,7 +2076,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
                         c.sw - btn_w - c.L.pad;
                     ui.drawButton("Gen", gen_x, btn_y2, btn_w, btn_h2, .{ .r = 40, .g = 90, .b = 150, .a = 255 });
                 } else if (comptime is_android) {
-                    rl.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
+                    ui.drawText(">", c.sw - c.L.pad - c.L.fs_body, val_y, c.L.fs_body, .dark_gray);
                 }
             }
         }
@@ -2085,18 +2085,18 @@ fn drawEdit(self: *Self, c: Ctx) void {
     }
 
     if (self.edit_err) |msg| {
-        rl.drawText(msg, c.L.pad, c.sh - c.L.fs_label - c.L.pad, c.L.fs_label, .orange);
+        ui.drawText(msg, c.L.pad, c.sh - c.L.fs_label - c.L.pad, c.L.fs_label, .orange);
     }
 
     // Header (drawn last)
     const hdr_btn_w = c.L.hdr_btn_w;
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    rl.drawText("Cancel", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
-    const save_tw = rl.measureText("Save", c.L.fs_body);
-    rl.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
+    ui.drawText("Cancel", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    const save_tw = ui.measureText("Save", c.L.fs_body);
+    ui.drawText("Save", c.sw - hdr_btn_w + @divTrunc(hdr_btn_w - save_tw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 80, .g = 200, .b = 100, .a = 255 });
 
     if (comptime !is_android) {
-        rl.drawText("Tab: next   Enter: save   Esc: cancel   g: gen pw", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("Tab: next   Enter: save   Esc: cancel   g: gen pw", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Password generator overlay (drawn on top of everything else).
@@ -2105,7 +2105,7 @@ fn drawEdit(self: *Self, c: Ctx) void {
 
 fn drawHistory(self: *Self, c: Ctx) void {
     const entry = self.hist_entry orelse {
-        rl.drawText("No history entry.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        ui.drawText("No history entry.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
         return;
     };
 
@@ -2120,14 +2120,14 @@ fn drawHistory(self: *Self, c: Ctx) void {
     // "Copied!" toast
     if (self.copy_feedback_timer > 0) {
         const toast = "Copied!";
-        const ttw = rl.measureText(toast, c.L.fs_body);
+        const ttw = ui.measureText(toast, c.L.fs_body);
         const toast_pad = c.L.pad * 2;
         const toast_w = ttw + toast_pad * 2;
         const toast_h = c.L.fs_body + toast_pad;
         const toast_x = @divTrunc(c.sw - toast_w, 2);
         const toast_y = bar_y - toast_h - c.L.pad;
         rl.drawRectangle(toast_x, toast_y, toast_w, toast_h, .{ .r = 30, .g = 30, .b = 30, .a = 220 });
-        rl.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
+        ui.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
     }
 
     // Bottom button bar: [Prev] [Copy to new entry] [Next]
@@ -2153,18 +2153,18 @@ fn drawHistory(self: *Self, c: Ctx) void {
 
     // Header (drawn last so it covers scrolled content).
     rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-    rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
 
     // Version indicator: "Version N / M" centered in header.
     const total = self.hist_hashes.items.len;
     const ver_num = if (total > 0) total - self.hist_idx else 0;
     var vbuf: [48:0]u8 = std.mem.zeroes([48:0]u8);
     _ = std.fmt.bufPrintZ(&vbuf, "v{d}/{d}", .{ ver_num, total }) catch {};
-    const vtw = rl.measureText(&vbuf, c.L.fs_body);
-    rl.drawText(&vbuf, @divTrunc(c.sw - vtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 180, .g = 180, .b = 200, .a = 255 });
+    const vtw = ui.measureText(&vbuf, c.L.fs_body);
+    ui.drawText(&vbuf, @divTrunc(c.sw - vtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 180, .g = 180, .b = 200, .a = 255 });
 
     if (comptime !is_android) {
-        rl.drawText("h: pw  Esc: back", c.L.pad, bar_y - c.L.fs_small - @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
+        ui.drawText("h: pw  Esc: back", c.L.pad, bar_y - c.L.fs_small - @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
     }
 }
 
@@ -2180,18 +2180,18 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
     const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
 
-    rl.drawText("Loki Sync", c.L.pad, title_y, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.L.pad, title_y, c.L.fs_hdr, .white);
 
     const subtitle: [:0]const u8 = if (self.first_use)
         "First use: fetch the database from server"
     else
         "Sync database with server";
-    rl.drawText(subtitle, c.L.pad, sub_y, c.L.fs_label, .gray);
+    ui.drawText(subtitle, c.L.pad, sub_y, c.L.fs_label, .gray);
 
-    rl.drawText("Server IP", c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
+    ui.drawText("Server IP", c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
     ui.drawTextField(&self.ip_field, c.L.pad, ip_field_y, fw, c.L.fh, self.sync_focus_ip, self.sync_ip_err);
 
-    rl.drawText("Password", c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
+    ui.drawText("Password", c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
     ui.drawTextField(&self.sync_pw_field, c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
 
     const submit_label: [:0]const u8 = if (self.first_use) "Fetch" else "Sync";
@@ -2202,21 +2202,21 @@ fn drawSyncSetup(self: *Self, c: Ctx) void {
     }
 
     const err_y = create_btn_y + c.L.btn_h + c.L.pad;
-    if (self.sync_err) |msg| rl.drawText(msg, c.L.pad, err_y, c.L.fs_label, .orange);
+    if (self.sync_err) |msg| ui.drawText(msg, c.L.pad, err_y, c.L.fs_label, .orange);
 
     if (comptime !is_android) {
-        rl.drawText("Tab: switch field   Enter: submit", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("Tab: switch field   Enter: submit", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Back button in header when reached from browser
     if (self.sync_from_browser) {
         rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
-        rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+        ui.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
     }
 }
 
 fn drawSyncRunning(_: *Self, c: Ctx) void {
-    rl.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
     const dot_count = @as(usize, @intCast(@mod(@as(i64, @intFromFloat(rl.getTime() * 3)), 4)));
     const dots = [4][:0]const u8{ "", ".", "..", "..." };
     var sbuf: [64:0]u8 = std.mem.zeroes([64:0]u8);
@@ -2226,31 +2226,31 @@ fn drawSyncRunning(_: *Self, c: Ctx) void {
         else => "Please wait",
     };
     _ = std.fmt.bufPrintZ(&sbuf, "{s}{s}", .{ base_label, dots[dot_count] }) catch {};
-    const stw = rl.measureText(&sbuf, c.L.fs_body);
-    rl.drawText(&sbuf, @divTrunc(c.sw - stw, 2), @divTrunc(c.sh, 2), c.L.fs_body, .yellow);
+    const stw = ui.measureText(&sbuf, c.L.fs_body);
+    ui.drawText(&sbuf, @divTrunc(c.sw - stw, 2), @divTrunc(c.sh, 2), c.L.fs_body, .yellow);
 }
 
 fn drawSyncResult(_: *Self, c: Ctx) void {
-    rl.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.L.pad, c.L.pad * 2, c.L.fs_hdr, .white);
     const result_y = @divTrunc(c.sh, 4);
     const btn_y = c.sh - c.L.btn_h - c.L.pad;
     switch (sync.g_status.load(.acquire)) {
         .done => {
-            rl.drawText("Sync complete!", c.L.pad, result_y, c.L.fs_body, .green);
-            rl.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .green);
+            ui.drawText("Sync complete!", c.L.pad, result_y, c.L.fs_body, .green);
+            ui.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .green);
             if (sync.g_conflict_count > 0) {
                 var cbuf: [128:0]u8 = std.mem.zeroes([128:0]u8);
                 _ = std.fmt.bufPrintZ(&cbuf, "{d} conflict(s) — server version kept", .{sync.g_conflict_count}) catch {};
                 const conflict_y = result_y + c.L.fs_body + c.L.pad + c.L.fs_label + c.L.pad;
-                rl.drawText(&cbuf, c.L.pad, conflict_y, c.L.fs_label, .orange);
-                rl.drawText("Use the desktop TUI to review", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2), c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
-                rl.drawText("and resolve conflicts.", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2) + c.L.fs_small + 4, c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
+                ui.drawText(&cbuf, c.L.pad, conflict_y, c.L.fs_label, .orange);
+                ui.drawText("Use the desktop TUI to review", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2), c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
+                ui.drawText("and resolve conflicts.", c.L.pad, conflict_y + c.L.fs_label + @divTrunc(c.L.pad, 2) + c.L.fs_small + 4, c.L.fs_small, .{ .r = 200, .g = 160, .b = 80, .a = 255 });
             }
             ui.drawButton("Open DB", c.L.pad, btn_y, c.sw - 2 * c.L.pad, c.L.btn_h, .{ .r = 30, .g = 140, .b = 80, .a = 255 });
         },
         .failed => {
-            rl.drawText("Sync failed:", c.L.pad, result_y, c.L.fs_body, .red);
-            rl.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .red);
+            ui.drawText("Sync failed:", c.L.pad, result_y, c.L.fs_body, .red);
+            ui.drawText(&sync.g_msg_buf, c.L.pad, result_y + c.L.fs_body + c.L.pad, c.L.fs_label, .red);
             const half_w = @divTrunc(c.sw - 3 * c.L.pad, 2);
             ui.drawButton("Back", c.L.pad, btn_y, half_w, c.L.btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
             ui.drawButton("Retry", 2 * c.L.pad + half_w, btn_y, half_w, c.L.btn_h, .{ .r = 30, .g = 130, .b = 180, .a = 255 });
