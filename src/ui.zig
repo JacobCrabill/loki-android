@@ -64,31 +64,31 @@ pub const TextField = struct {
 // Design reference: 480 × 854 (portrait, 1x density).
 //
 pub const Layout = struct {
-    hdr_h: i32,        // top header / nav-bar height
-    row_h: i32,        // list row height (browser)
-    pad: i32,          // general padding
-    fh: i32,           // form field height
-    btn_h: i32,        // standard button height
-    fs_hdr: i32,       // header font size
-    fs_body: i32,      // body / value font size
-    fs_label: i32,     // field label font size
-    fs_small: i32,     // hint / secondary font size
+    hdr_h: i32, // top header / nav-bar height
+    row_h: i32, // list row height (browser)
+    pad: i32, // general padding
+    fh: i32, // form field height
+    btn_h: i32, // standard button height
+    fs_hdr: i32, // header font size
+    fs_body: i32, // body / value font size
+    fs_label: i32, // field label font size
+    fs_small: i32, // hint / secondary font size
     detail_row_h: i32, // detail view row height
-    label_w: i32,      // label column width in detail view
+    label_w: i32, // label column width in detail view
 
     pub fn compute(sw: i32) Layout {
         return .{
-            .hdr_h        = @divTrunc(sw, 8),            //  60 @ 480
-            .row_h        = @divTrunc(sw, 6),            //  80 @ 480
-            .pad          = @max(12, @divTrunc(sw, 30)), //  16 @ 480
-            .fh           = @divTrunc(sw, 9),            //  53 @ 480
-            .btn_h        = @divTrunc(sw, 8),            //  60 @ 480
-            .fs_hdr       = @divTrunc(sw, 17),           //  28 @ 480
-            .fs_body      = @divTrunc(sw, 24),           //  20 @ 480
-            .fs_label     = @divTrunc(sw, 30),           //  16 @ 480
-            .fs_small     = @divTrunc(sw, 38),           //  12 @ 480
-            .detail_row_h = @divTrunc(sw * 3, 16),       //  90 @ 480
-            .label_w      = @divTrunc(sw, 3),            // 160 @ 480
+            .hdr_h = @divTrunc(sw, 8), //  60 @ 480
+            .row_h = @divTrunc(sw, 6), //  80 @ 480
+            .pad = @max(12, @divTrunc(sw, 30)), //  16 @ 480
+            .fh = @divTrunc(sw, 9), //  53 @ 480
+            .btn_h = @divTrunc(sw, 8), //  60 @ 480
+            .fs_hdr = @divTrunc(sw, 17), //  28 @ 480
+            .fs_body = @divTrunc(sw, 24), //  20 @ 480
+            .fs_label = @divTrunc(sw, 30), //  16 @ 480
+            .fs_small = @divTrunc(sw, 38), //  12 @ 480
+            .detail_row_h = @divTrunc(sw * 3, 16), //  90 @ 480
+            .label_w = @divTrunc(sw, 3), // 160 @ 480
         };
     }
 };
@@ -116,7 +116,14 @@ pub fn rowLessThan(_: void, a: BrowserRow, b: BrowserRow) bool {
 // ---- App phases ----
 
 pub const Phase = enum {
-    unlock, browser, detail, edit, sync_setup, sync_running, sync_result,
+    unlock,
+    browser,
+    detail,
+    edit,
+    history,
+    sync_setup,
+    sync_running,
+    sync_result,
 };
 
 // ---- Edit / detail field metadata ----
@@ -136,9 +143,7 @@ pub fn fsByHeight(h: i32) i32 {
 
 pub fn drawTextField(f: *const TextField, x: i32, y: i32, w: i32, h: i32, focused: bool, err: bool) void {
     rl.drawRectangle(x, y, w, h, if (focused) .white else .light_gray);
-    const border: rl.Color = if (err) .{ .r = 220, .g = 50, .b = 50, .a = 255 }
-        else if (focused) .sky_blue
-        else .gray;
+    const border: rl.Color = if (err) .{ .r = 220, .g = 50, .b = 50, .a = 255 } else if (focused) .sky_blue else .gray;
     rl.drawRectangleLines(x, y, w, h, border);
 
     var disp: [max_field + 1:0]u8 = std.mem.zeroes([max_field + 1:0]u8);

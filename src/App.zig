@@ -52,6 +52,18 @@ detail_scroll: f32 = 0,
 detail_delete_confirm_pending: bool = false,
 detail_delete_confirm_timer: f32 = 0,
 
+// History
+/// Ordered chain of version hashes: index 0 = current HEAD, last = genesis.
+hist_hashes: std.ArrayListUnmanaged([20]u8) = .{},
+/// Index into hist_hashes currently being viewed (0 = latest).
+hist_idx: usize = 0,
+/// The entry version currently shown in the history view.
+hist_entry: ?loki.Entry = null,
+/// Scroll offset for the history detail view.
+hist_scroll: f32 = 0,
+/// Whether the history password field is revealed.
+hist_show_pw: bool = false,
+
 // Edit
 edit_fields: [7]ui.TextField = defaultEditFields(),
 edit_pending: ?usize = null,
@@ -119,6 +131,8 @@ pub fn init(allocator: std.mem.Allocator) Self {
 
 pub fn deinit(self: *Self) void {
     if (self.detail_entry) |e| e.deinit(self.allocator);
+    if (self.hist_entry) |e| e.deinit(self.allocator);
+    self.hist_hashes.deinit(self.allocator);
     for (self.rows.items) |r| r.deinit(self.allocator);
     self.rows.deinit(self.allocator);
     if (self.db) |*d| d.deinit();
@@ -127,6 +141,9 @@ pub fn deinit(self: *Self) void {
 fn lock(self: *Self) void {
     if (self.detail_entry) |e| e.deinit(self.allocator);
     self.detail_entry = null;
+    if (self.hist_entry) |e| e.deinit(self.allocator);
+    self.hist_entry = null;
+    self.hist_hashes.clearRetainingCapacity();
     for (self.rows.items) |r| r.deinit(self.allocator);
     self.rows.clearRetainingCapacity();
     if (self.db) |*d| d.deinit();
@@ -167,7 +184,7 @@ pub fn update(self: *Self) void {
 
     // Auto-lock after 5 minutes of inactivity when DB is open
     const unlocked = switch (self.phase) {
-        .browser, .detail, .edit => true,
+        .browser, .detail, .edit, .history => true,
         else => false,
     };
     if (unlocked and self.db != null and now - self.last_interaction_time > 300.0) {
@@ -197,6 +214,7 @@ pub fn update(self: *Self) void {
         .browser => self.inputBrowser(c),
         .detail => self.inputDetail(c),
         .edit => self.inputEdit(c),
+        .history => self.inputHistory(c),
         .sync_setup => self.inputSyncSetup(c),
         .sync_running => self.inputSyncRunning(c),
         .sync_result => self.inputSyncResult(c),
@@ -212,6 +230,7 @@ pub fn update(self: *Self) void {
         .browser => self.drawBrowser(c),
         .detail => self.drawDetail(c),
         .edit => self.drawEdit(c),
+        .history => self.drawHistory(c),
         .sync_setup => self.drawSyncSetup(c),
         .sync_running => self.drawSyncRunning(c),
         .sync_result => self.drawSyncResult(c),
@@ -649,10 +668,19 @@ fn inputDetail(self: *Self, c: Ctx) void {
     }
     const del_btn_h = c.L.btn_h;
     const del_btn_y = c.sh - del_btn_h - c.L.pad;
+    const hist_btn_h = c.L.btn_h;
+    const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
     if (c.is_tap) {
         if (ui.inRect(c.mx, c.my, 0, 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
             self.detail_delete_confirm_pending = false;
             self.phase = .browser;
+        } else if (ui.inRect(c.mx, c.my, c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h)) {
+            // "View History" — build chain and enter history phase.
+            self.hist_idx = 0;
+            self.hist_show_pw = false;
+            self.hist_scroll = 0;
+            self.loadHistory(self.detail_head_hash);
+            self.phase = .history;
         } else if (ui.inRect(c.mx, c.my, c.sw - @divTrunc(c.sw, 3), 0, @divTrunc(c.sw, 3), c.L.hdr_h)) {
             if (self.detail_entry) |e| {
                 const vals = [7][]const u8{
@@ -888,6 +916,177 @@ fn doSave(self: *Self) void {
         }
         self.phase = .detail;
     }
+}
+
+/// Populate hist_hashes with the full version chain starting from `head_hash`.
+/// Index 0 = latest (head), last = genesis.  Also loads hist_entry for the
+/// given index.  Caller must have cleared/deinited previous hist state first.
+fn loadHistory(self: *Self, head_hash: [20]u8) void {
+    self.hist_hashes.clearRetainingCapacity();
+    if (self.hist_entry) |e| e.deinit(self.allocator);
+    self.hist_entry = null;
+
+    const d = if (self.db) |*d_| d_ else return;
+
+    // Walk the parent_hash chain from HEAD to genesis.
+    var cur_hash: [20]u8 = head_hash;
+    while (true) {
+        self.hist_hashes.append(self.allocator, cur_hash) catch break;
+        const ver = d.getVersion(cur_hash) catch break;
+        const maybe_parent = ver.parent_hash;
+        ver.deinit(self.allocator);
+        if (maybe_parent) |p| {
+            cur_hash = p;
+        } else {
+            break;
+        }
+    }
+
+    // Load the entry for the current index.
+    self.loadHistEntry();
+}
+
+/// Load (or reload) hist_entry for hist_idx.
+fn loadHistEntry(self: *Self) void {
+    if (self.hist_entry) |e| e.deinit(self.allocator);
+    self.hist_entry = null;
+    if (self.hist_idx >= self.hist_hashes.items.len) return;
+    const d = if (self.db) |*d_| d_ else return;
+    self.hist_entry = d.getVersion(self.hist_hashes.items[self.hist_idx]) catch null;
+}
+
+fn inputHistory(self: *Self, c: Ctx) void {
+    if (rl.isMouseButtonDown(.left)) {
+        self.hist_scroll -= rl.getMouseDelta().y;
+    }
+    self.hist_scroll = @max(0, self.hist_scroll);
+
+    if (comptime !is_android) {
+        if (rl.isKeyPressed(.h)) self.hist_show_pw = !self.hist_show_pw;
+        if (rl.isKeyPressed(.escape) or rl.isKeyPressed(.backspace)) {
+            // Return to latest version in normal detail view.
+            self.phase = .detail;
+        }
+    }
+
+    if (c.is_tap) {
+        const hdr_btn_w = @divTrunc(c.sw, 4);
+        const btn_h = c.L.btn_h;
+        // Bottom button bar layout:
+        //   [Prev]  [Copy to new entry]  [Next]   — above footer
+        //   [Back to latest]                       — footer row
+        const footer_y = c.sh - btn_h - c.L.pad;
+        const bar_y = footer_y - btn_h - @divTrunc(c.L.pad, 2);
+        const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
+
+        // "Back" button (bottom row) — return to latest version in detail view.
+        if (ui.inRect(c.mx, c.my, c.L.pad, footer_y, c.sw - 2 * c.L.pad, btn_h)) {
+            self.phase = .detail;
+            return;
+        }
+
+        // "Prev" button — go to an older version (higher index).
+        const prev_x = c.L.pad;
+        const has_prev = self.hist_idx + 1 < self.hist_hashes.items.len;
+        if (has_prev and ui.inRect(c.mx, c.my, prev_x, bar_y, third_w, btn_h)) {
+            self.hist_idx += 1;
+            self.loadHistEntry();
+            self.hist_scroll = 0;
+            return;
+        }
+
+        // "Next" button — go to a newer version (lower index).
+        const next_x = c.L.pad + third_w + c.L.pad + third_w + c.L.pad;
+        const has_next = self.hist_idx > 0;
+        if (has_next and ui.inRect(c.mx, c.my, next_x, bar_y, third_w, btn_h)) {
+            self.hist_idx -= 1;
+            self.loadHistEntry();
+            self.hist_scroll = 0;
+            return;
+        }
+
+        // "Copy to new entry" button (middle).
+        const copy_x = c.L.pad + third_w + c.L.pad;
+        if (ui.inRect(c.mx, c.my, copy_x, bar_y, third_w, btn_h)) {
+            self.copyHistEntryToNew();
+            return;
+        }
+
+        // "< Back" header tap — return to latest version in detail view.
+        if (ui.inRect(c.mx, c.my, 0, 0, hdr_btn_w, c.L.hdr_h)) {
+            self.phase = .detail;
+            return;
+        }
+
+        // Show/Hide password toggle.
+        const entry = self.hist_entry orelse return;
+        const scroll_i: i32 = @intFromFloat(self.hist_scroll);
+        const toggle_w = @divTrunc(c.sw, 5);
+        const pw_row_y = c.L.hdr_h + c.L.pad + ui.DETAIL_PW_IDX * c.L.detail_row_h - scroll_i;
+        if (ui.inRect(c.mx, c.my, c.sw - toggle_w - c.L.pad, pw_row_y, toggle_w, c.L.detail_row_h)) {
+            self.hist_show_pw = !self.hist_show_pw;
+            return;
+        }
+
+        // Tap any field row to copy value.
+        const vals = [7][]const u8{
+            entry.title, entry.path,     entry.description,
+            entry.url,   entry.username, entry.password,
+            entry.notes,
+        };
+        for (0..7) |fi| {
+            const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
+            if (ui.inRect(c.mx, c.my, 0, fy, c.sw, c.L.detail_row_h)) {
+                var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                const n = @min(vals[fi].len, ui.max_field);
+                @memcpy(cbuf[0..n], vals[fi][0..n]);
+                rl.setClipboardText(&cbuf);
+                self.copy_feedback_timer = 1.5;
+                break;
+            }
+        }
+    }
+}
+
+/// Copy the currently-viewed history entry as a new entry (with "(COPY) " prepended
+/// to the title), add it to the index, and navigate to its detail view.
+fn copyHistEntryToNew(self: *Self) void {
+    const entry = self.hist_entry orelse return;
+    const d = if (self.db) |*d_| d_ else return;
+
+    // Build the new title: "(COPY) <original title>"
+    var title_buf: [ui.max_field]u8 = undefined;
+    const prefix = "(COPY) ";
+    const prefix_len = prefix.len;
+    @memcpy(title_buf[0..prefix_len], prefix);
+    const orig_len = @min(entry.title.len, ui.max_field - prefix_len);
+    @memcpy(title_buf[prefix_len .. prefix_len + orig_len], entry.title[0..orig_len]);
+    const new_title_len = prefix_len + orig_len;
+
+    const new_entry = loki.Entry{
+        .parent_hash = null,
+        .title = title_buf[0..new_title_len],
+        .path = entry.path,
+        .description = entry.description,
+        .url = entry.url,
+        .username = entry.username,
+        .password = entry.password,
+        .notes = entry.notes,
+    };
+
+    const new_id = d.createEntry(new_entry) catch return;
+    d.save() catch return;
+    self.repopulateRows(d) catch return;
+
+    // Navigate to the new entry's detail view (outside history).
+    if (self.detail_entry) |e| e.deinit(self.allocator);
+    self.detail_entry = d.getEntry(new_id) catch null;
+    self.detail_entry_id = new_id;
+    self.detail_head_hash = new_id; // genesis: head == entry_id
+    self.detail_show_pw = false;
+    self.detail_scroll = 0;
+    self.detail_delete_confirm_pending = false;
+    self.phase = .detail;
 }
 
 fn inputSyncSetup(self: *Self, c: Ctx) void {
@@ -1309,6 +1508,11 @@ fn drawDetail(self: *Self, c: Ctx) void {
         ui.drawButton("Delete", c.L.pad, del_btn_y, c.sw - 2 * c.L.pad, del_btn_h, .{ .r = 160, .g = 40, .b = 40, .a = 255 });
     }
 
+    // "View History" button — sits above Delete.
+    const hist_btn_h = c.L.btn_h;
+    const hist_btn_y = del_btn_y - hist_btn_h - @divTrunc(c.L.pad, 2);
+    ui.drawButton("View History", c.L.pad, hist_btn_y, c.sw - 2 * c.L.pad, hist_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 255 });
+
     // "Copied!" toast
     if (self.copy_feedback_timer > 0) {
         const toast = "Copied!";
@@ -1443,6 +1647,125 @@ fn drawEdit(self: *Self, c: Ctx) void {
 
     if (comptime !is_android) {
         rl.drawText("Tab: next   Enter: newline(Notes)/save   Esc: cancel", c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+    }
+}
+
+fn drawHistory(self: *Self, c: Ctx) void {
+    const entry = self.hist_entry orelse {
+        rl.drawText("No history entry.", c.L.pad, c.L.hdr_h + c.L.pad, c.L.fs_body, .gray);
+        return;
+    };
+
+    const scroll_i: i32 = @intFromFloat(self.hist_scroll);
+    const val_x = c.L.label_w + c.L.pad;
+    const toggle_w = @divTrunc(c.sw, 5);
+
+    // Bottom button layout.
+    const btn_h = c.L.btn_h;
+    const footer_y = c.sh - btn_h - c.L.pad;
+    const bar_y = footer_y - btn_h - @divTrunc(c.L.pad, 2);
+
+    // Draw fields (same style as drawDetail).
+    const Field = struct { label: []const u8, value: []const u8 };
+    const fields = [_]Field{
+        .{ .label = "Title", .value = entry.title },
+        .{ .label = "Path", .value = entry.path },
+        .{ .label = "Desc", .value = entry.description },
+        .{ .label = "URL", .value = entry.url },
+        .{ .label = "Username", .value = entry.username },
+        .{ .label = "Password", .value = entry.password },
+        .{ .label = "Notes", .value = entry.notes },
+    };
+
+    for (fields, 0..) |f, fi| {
+        const is_notes = fi == fields.len - 1;
+        const fy = c.L.hdr_h + c.L.pad + @as(i32, @intCast(fi)) * c.L.detail_row_h - scroll_i;
+        if (fy + c.L.detail_row_h < c.L.hdr_h or fy > c.sh) continue;
+
+        const bg: rl.Color = if (fi % 2 == 0)
+            .{ .r = 18, .g = 18, .b = 28, .a = 255 }
+        else
+            .{ .r = 26, .g = 26, .b = 38, .a = 255 };
+        const draw_h = if (is_notes) @max(c.L.detail_row_h, c.sh - fy) else c.L.detail_row_h;
+        rl.drawRectangle(0, fy, c.sw, draw_h, bg);
+
+        ui.drawSlice(f.label, c.L.pad, fy + @divTrunc(c.L.detail_row_h - c.L.fs_label, 2), c.L.fs_label, .gray);
+
+        const val_y = fy + @divTrunc(c.L.detail_row_h - c.L.fs_body, 2);
+        const is_pw = fi == ui.DETAIL_PW_IDX;
+
+        if (is_pw and !self.hist_show_pw) {
+            var stars: [64:0]u8 = undefined;
+            const n = @min(f.value.len, 63);
+            @memset(stars[0..n], '*');
+            stars[n] = 0;
+            rl.drawText(&stars, val_x, val_y, c.L.fs_body, .white);
+        } else if (is_pw) {
+            ui.drawSlice(f.value, val_x, val_y, c.L.fs_body, .{ .r = 255, .g = 200, .b = 100, .a = 255 });
+        } else {
+            ui.drawSlice(f.value, val_x, val_y, c.L.fs_body, .white);
+        }
+
+        if (is_pw) {
+            const toggle_h = @divTrunc(c.L.detail_row_h * 2, 3);
+            const toggle_label: [:0]const u8 = if (self.hist_show_pw) "Hide" else "Show";
+            ui.drawButton(toggle_label, c.sw - toggle_w - c.L.pad, fy + @divTrunc(c.L.detail_row_h - toggle_h, 2), toggle_w, toggle_h, .{ .r = 60, .g = 60, .b = 90, .a = 255 });
+        }
+
+        if (!is_notes) rl.drawRectangle(0, fy + c.L.detail_row_h - 1, c.sw, 1, .{ .r = 40, .g = 40, .b = 55, .a = 255 });
+    }
+
+    // "Copied!" toast
+    if (self.copy_feedback_timer > 0) {
+        const toast = "Copied!";
+        const ttw = rl.measureText(toast, c.L.fs_body);
+        const toast_pad = c.L.pad * 2;
+        const toast_w = ttw + toast_pad * 2;
+        const toast_h = c.L.fs_body + toast_pad;
+        const toast_x = @divTrunc(c.sw - toast_w, 2);
+        const toast_y = bar_y - toast_h - c.L.pad;
+        rl.drawRectangle(toast_x, toast_y, toast_w, toast_h, .{ .r = 30, .g = 30, .b = 30, .a = 220 });
+        rl.drawText(toast, toast_x + toast_pad, toast_y + @divTrunc(toast_pad, 2), c.L.fs_body, .white);
+    }
+
+    // Bottom button bar: [Prev] [Copy to new entry] [Next]
+    const third_w = @divTrunc(c.sw - 4 * c.L.pad, 3);
+    const prev_x = c.L.pad;
+    const copy_x = c.L.pad + third_w + c.L.pad;
+    const next_x = c.L.pad + third_w + c.L.pad + third_w + c.L.pad;
+
+    const has_prev = self.hist_idx + 1 < self.hist_hashes.items.len;
+    const has_next = self.hist_idx > 0;
+    const prev_color: rl.Color = if (has_prev)
+        .{ .r = 30, .g = 130, .b = 180, .a = 255 }
+    else
+        .{ .r = 50, .g = 50, .b = 70, .a = 255 };
+    const next_color: rl.Color = if (has_next)
+        .{ .r = 30, .g = 130, .b = 180, .a = 255 }
+    else
+        .{ .r = 50, .g = 50, .b = 70, .a = 255 };
+
+    ui.drawButton("Prev", prev_x, bar_y, third_w, btn_h, prev_color);
+    ui.drawButton("Copy", copy_x, bar_y, third_w, btn_h, .{ .r = 50, .g = 120, .b = 60, .a = 255 });
+    ui.drawButton("Next", next_x, bar_y, third_w, btn_h, next_color);
+
+    // Footer: [Back to latest]
+    ui.drawButton("Back", c.L.pad, footer_y, c.sw - 2 * c.L.pad, btn_h, .{ .r = 70, .g = 70, .b = 90, .a = 255 });
+
+    // Header (drawn last so it covers scrolled content).
+    rl.drawRectangle(0, 0, c.sw, c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    rl.drawText("< Back", c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+
+    // Version indicator: "Version N / M" centered in header.
+    const total = self.hist_hashes.items.len;
+    const ver_num = if (total > 0) total - self.hist_idx else 0;
+    var vbuf: [48:0]u8 = std.mem.zeroes([48:0]u8);
+    _ = std.fmt.bufPrintZ(&vbuf, "v{d}/{d}", .{ ver_num, total }) catch {};
+    const vtw = rl.measureText(&vbuf, c.L.fs_body);
+    rl.drawText(&vbuf, @divTrunc(c.sw - vtw, 2), @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .{ .r = 180, .g = 180, .b = 200, .a = 255 });
+
+    if (comptime !is_android) {
+        rl.drawText("h: pw  Esc: back", c.L.pad, bar_y - c.L.fs_small - @divTrunc(c.L.pad, 2), c.L.fs_small, .dark_gray);
     }
 }
 
