@@ -1,7 +1,7 @@
 .{
     .name = .raylib,
     .version = "0.1.0",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.2",
     .fingerprint = 0x13035e5cf42e313f,
     .dependencies = .{
         .android = .{
