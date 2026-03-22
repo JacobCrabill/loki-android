@@ -11,6 +11,20 @@ pub extern fn showTextInputDialog(title: [*c]const u8, current: [*c]const u8, is
 pub extern fn showTextInputDialogMultiline(title: [*c]const u8, current: [*c]const u8) void;
 pub extern fn pollTextInputDialog(out_buf: [*]u8, buf_size: c_int) c_int;
 
+// ---- Android biometric unlock ----
+
+pub extern fn biometricIsAvailable() c_int;
+pub extern fn biometricHasEnrolled() c_int;
+/// Encrypt `password` under the Keystore key and store the blob.
+/// Result delivered via pollBiometricResult().
+pub extern fn biometricEnroll(password: [*c]const u8) void;
+/// Show the biometric prompt for decryption.
+/// Result (plaintext password or cancel) via pollBiometricResult().
+pub extern fn biometricAuthenticate() void;
+pub extern fn biometricClearEnrollment() void;
+/// Returns 0=waiting, -1=failed/cancel, >0=success (strlen+1 in out_buf).
+pub extern fn pollBiometricResult(out_buf: [*]u8, buf_size: c_int) c_int;
+
 // ---- Text input field ----
 
 pub const max_field = 511;

@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
         apk.addResourceDirectory(b.path("android/res"));
         apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/TextInput.java") });
         apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/MainActivity.java") });
+        apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/Biometric.java") });
 
         break :blk apk;
     };
@@ -76,6 +77,7 @@ pub fn build(b: *std.Build) void {
             app.addCSourceFile(.{ .file = native_app_glue_dir.path(b, "android_native_app_glue.c") });
             app.addIncludePath(native_app_glue_dir);
             app.addCSourceFile(.{ .file = b.path("src/android_keyboard.c") });
+            app.addCSourceFile(.{ .file = b.path("src/android_biometric.c") });
 
             apk.addArtifact(b.addLibrary(.{
                 .linkage = .dynamic,

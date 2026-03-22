@@ -38,6 +38,18 @@ unlock_pw: ui.TextField = .{ .masked = true },
 unlock_err: ?[:0]const u8 = null,
 unlock_dialog_shown: bool = false,
 
+// Biometric unlock (Android only)
+/// True if the device supports strong biometrics (cached at init).
+bio_available: bool = false,
+/// True if an encrypted credential blob exists on disk.
+bio_enrolled: bool = false,
+/// True while we're waiting for a biometricAuthenticate() result.
+bio_auth_pending: bool = false,
+/// True while we're waiting for a biometricEnroll() result.
+bio_enroll_pending: bool = false,
+/// Non-null error/status message to show on the unlock screen.
+bio_err: ?[:0]const u8 = null,
+
 // DB + browser
 db: ?loki.Database = null,
 rows: std.ArrayListUnmanaged(ui.BrowserRow) = .{},
@@ -137,6 +149,15 @@ pub fn init(allocator: std.mem.Allocator) Self {
         const n = fs.loadPrefs(base, &prefs_buf);
         if (n > 0) self.ip_field.setDefault(prefs_buf[0..n]);
     }
+    if (comptime is_android) {
+        self.bio_available = ui.biometricIsAvailable() != 0;
+        self.bio_enrolled = self.bio_available and ui.biometricHasEnrolled() != 0;
+        // Auto-trigger biometric prompt on launch if a DB exists and we're enrolled.
+        if (self.phase == .unlock and self.bio_enrolled) {
+            ui.biometricAuthenticate();
+            self.bio_auth_pending = true;
+        }
+    }
     return self;
 }
 
@@ -162,9 +183,20 @@ fn lock(self: *Self) void {
     self.unlock_pw = .{ .masked = true };
     self.unlock_err = null;
     self.unlock_dialog_shown = false;
+    self.bio_err = null;
+    self.bio_auth_pending = false;
+    self.bio_enroll_pending = false;
     self.browser_path_len = 0;
     self.browser_scroll = 0;
     self.phase = .unlock;
+    // Re-trigger biometric prompt after lock if enrolled.
+    if (comptime is_android) {
+        self.bio_enrolled = self.bio_available and ui.biometricHasEnrolled() != 0;
+        if (self.bio_enrolled) {
+            ui.biometricAuthenticate();
+            self.bio_auth_pending = true;
+        }
+    }
 }
 
 // ---- Main per-frame update ----
@@ -367,6 +399,25 @@ fn subdirName(row_path: []const u8, parent_path: []const u8) ?[]const u8 {
 // INPUT
 // ============================================================
 
+/// Helper: open the DB with the given password slice and transition to browser.
+/// Returns true on success.
+fn unlockWithPassword(self: *Self, pw: []const u8) bool {
+    self.openDbAndPopulate(pw) catch |err| {
+        self.unlock_err = switch (err) {
+            error.WrongPassword => "Wrong password.",
+            else => "Failed to open database.",
+        };
+        return false;
+    };
+    if (self.db != null) {
+        self.browser_scroll = 0;
+        self.browser_path_len = 0;
+        self.phase = .browser;
+        return true;
+    }
+    return false;
+}
+
 fn inputUnlock(self: *Self, c: Ctx) void {
     const fw = c.sw - 2 * c.L.pad;
     const del_btn_y = c.sh - c.L.btn_h - c.L.pad;
@@ -379,6 +430,11 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             for (self.rows.items) |r| r.deinit(self.allocator);
             self.rows.clearRetainingCapacity();
             if (fs.deleteDb()) {
+                // Also wipe any biometric enrollment for this DB.
+                if (comptime is_android) {
+                    if (self.bio_available) ui.biometricClearEnrollment();
+                    self.bio_enrolled = false;
+                }
                 self.delete_db_err = null;
                 self.sync_err = null;
                 self.sync_from_browser = false;
@@ -396,6 +452,47 @@ fn inputUnlock(self: *Self, c: Ctx) void {
     }
 
     if (comptime is_android) {
+        // ---- Poll biometric authenticate result ----
+        if (self.bio_auth_pending) {
+            var rbuf: [ui.max_field + 1]u8 = undefined;
+            const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
+            if (poll > 0) {
+                self.bio_auth_pending = false;
+                // poll > 0 means success; length = poll - 1.
+                const n: usize = @intCast(poll - 1);
+                _ = self.unlockWithPassword(rbuf[0..n]);
+                if (self.db == null) {
+                    // Decryption succeeded but DB open failed — key was probably
+                    // invalidated (new biometrics enrolled). Clear enrollment.
+                    ui.biometricClearEnrollment();
+                    self.bio_enrolled = false;
+                    self.bio_err = "Biometric key invalidated. Please re-enroll.";
+                }
+            } else if (poll < 0) {
+                // User cancelled or auth error — fall back to password field.
+                self.bio_auth_pending = false;
+            }
+            // While pending, don't process other input.
+            return;
+        }
+
+        // ---- Poll biometric enroll result ----
+        if (self.bio_enroll_pending) {
+            var rbuf: [ui.max_field + 1]u8 = undefined;
+            const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
+            if (poll > 0) {
+                // Empty string = enroll succeeded.
+                self.bio_enroll_pending = false;
+                self.bio_enrolled = true;
+                self.bio_err = "Biometric unlock enabled.";
+            } else if (poll < 0) {
+                self.bio_enroll_pending = false;
+                self.bio_err = "Biometric enroll cancelled.";
+            }
+            return;
+        }
+
+        // ---- Text-input dialog poll (password entry) ----
         var rbuf: [ui.max_field + 1]u8 = undefined;
         const poll = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
         if (poll > 0) {
@@ -403,16 +500,16 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             self.unlock_pw.len = n;
             @memcpy(self.unlock_pw.buf[0..n], rbuf[0..n]);
             self.unlock_dialog_shown = false;
-            self.openDbAndPopulate(self.unlock_pw.slice()) catch |err| {
-                self.unlock_err = switch (err) {
-                    error.WrongPassword => "Wrong password.",
-                    else => "Failed to open database.",
-                };
-            };
-            if (self.db != null) {
-                self.browser_scroll = 0;
-                self.browser_path_len = 0;
-                self.phase = .browser;
+            const opened = self.unlockWithPassword(self.unlock_pw.slice());
+            // After a successful password unlock, offer to enroll biometrics
+            // if available and not yet enrolled.
+            if (opened and self.bio_available and !self.bio_enrolled) {
+                // Kick off enroll immediately — the user just proved their password.
+                var pw_cstr: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                @memcpy(pw_cstr[0..n], rbuf[0..n]);
+                ui.biometricEnroll(&pw_cstr);
+                self.bio_enroll_pending = true;
+                // We've already transitioned to .browser; enroll runs in background.
             }
         } else if (poll < 0) {
             self.unlock_dialog_shown = false;
@@ -422,6 +519,18 @@ fn inputUnlock(self: *Self, c: Ctx) void {
             if (ui.inRect(c.mx, c.my, c.L.pad, field_y, fw2, c.L.fh)) {
                 self.unlock_pw.showDialog("Enter password", true);
                 self.unlock_dialog_shown = true;
+                self.unlock_err = null;
+                self.bio_err = null;
+            }
+        }
+
+        // ---- "Use biometrics" button (visible when enrolled) ----
+        if (self.bio_enrolled and !self.unlock_dialog_shown) {
+            const bio_btn_y = del_btn_y - c.L.btn_h - @divTrunc(c.L.pad, 2);
+            if (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, bio_btn_y, fw, c.L.btn_h)) {
+                ui.biometricAuthenticate();
+                self.bio_auth_pending = true;
+                self.bio_err = null;
                 self.unlock_err = null;
             }
         }
@@ -436,17 +545,7 @@ fn inputUnlock(self: *Self, c: Ctx) void {
         const open_pressed = rl.isKeyPressed(.enter) or
             (c.is_tap and ui.inRect(c.mx, c.my, c.L.pad, btn_y, btn_w, c.L.btn_h));
         if (open_pressed) {
-            self.openDbAndPopulate(self.unlock_pw.slice()) catch |err| {
-                self.unlock_err = switch (err) {
-                    error.WrongPassword => "Wrong password.",
-                    else => "Failed to open database.",
-                };
-            };
-            if (self.db != null) {
-                self.browser_scroll = 0;
-                self.browser_path_len = 0;
-                self.phase = .browser;
-            }
+            _ = self.unlockWithPassword(self.unlock_pw.slice());
         }
     }
 }
@@ -1616,6 +1715,33 @@ fn drawUnlock(self: *Self, c: Ctx) void {
     }
     if (self.delete_db_err) |msg| {
         rl.drawText(msg, c.L.pad, del_btn_y - c.L.fs_label - c.L.pad, c.L.fs_label, .red);
+    }
+
+    // Biometric button and status (Android only, when enrolled or auth pending).
+    if (comptime is_android) {
+        const bio_btn_y = del_btn_y - c.L.btn_h - @divTrunc(c.L.pad, 2);
+
+        if (self.bio_auth_pending) {
+            // Show a "waiting" indicator while the system prompt is up.
+            ui.drawButton("Waiting for biometrics...", c.L.pad, bio_btn_y, fw, c.L.btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+        } else if (self.bio_enrolled) {
+            ui.drawButton("Unlock with biometrics", c.L.pad, bio_btn_y, fw, c.L.btn_h, .{ .r = 40, .g = 80, .b = 160, .a = 255 });
+        }
+
+        // Biometric status / error message.
+        if (self.bio_err) |msg| {
+            const is_info = msg[0] == 'B'; // "Biometric unlock enabled." starts with B
+            const color: rl.Color = if (is_info)
+                .{ .r = 80, .g = 200, .b = 120, .a = 255 }
+            else
+                .orange;
+            const etw = rl.measureText(msg, c.L.fs_label);
+            const msg_y = if (self.bio_enrolled or self.bio_auth_pending)
+                bio_btn_y - c.L.fs_label - @divTrunc(c.L.pad, 2)
+            else
+                del_btn_y - c.L.fs_label - c.L.pad;
+            rl.drawText(msg, @divTrunc(c.sw - etw, 2), msg_y, c.L.fs_label, color);
+        }
     }
 }
 
