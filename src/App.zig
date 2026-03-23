@@ -157,6 +157,22 @@ sync_pw_err: bool = false,
 /// Android only: true while we wait for biometric auth to pre-fill the sync password.
 sync_bio_pending: bool = false,
 
+// Address book
+addrs: [ui.max_addrs]ui.ServerAddr = [_]ui.ServerAddr{.{}} ** ui.max_addrs,
+addr_count: usize = 0,
+selected_addr: usize = 0,
+addr_dropdown_open: bool = false,
+
+// Manage addresses screen
+manage_name_field: ui.TextField = .{},
+manage_ip_field: ui.TextField = .{},
+manage_scroll: f32 = 0,
+manage_focus_name: bool = true,
+manage_pending_field: ?bool = null, // Android dialog: true=name, false=ip
+manage_delete_confirm: ConfirmButton = .{},
+manage_delete_idx: usize = 0,
+manage_err: ?[:0]const u8 = null,
+
 // Search
 search_field: ui.TextField = .{},
 search_pending: bool = false,
@@ -190,13 +206,34 @@ pub fn init(allocator: std.mem.Allocator) Self {
     var self = Self{ .allocator = allocator };
     self.phase = if (fs.dbDirExists()) .unlock else .sync_setup;
     self.first_use = (self.phase == .sync_setup);
-    self.ip_field.setDefault("192.168.1.100");
-    load_prefs: {
-        var base = fs.openBaseDir() catch break :load_prefs;
+    // Load address book (new format), falling back to old loki_prefs for migration.
+    load_addrs: {
+        var base = fs.openBaseDir() catch break :load_addrs;
         defer if (comptime is_android) base.close();
-        var prefs_buf: [ui.max_field]u8 = undefined;
-        const n = fs.loadPrefs(base, &prefs_buf);
-        if (n > 0) self.ip_field.setDefault(prefs_buf[0..n]);
+
+        if (!fs.loadAddrs(base, &self.addrs, &self.addr_count, &self.selected_addr)) {
+            // New file not found — try migrating from old format.
+            var prefs_buf: [ui.max_field]u8 = undefined;
+            const n = fs.loadPrefs(base, &prefs_buf);
+            if (n > 0) {
+                self.addrs[0] = .{};
+                const name_str = "Server";
+                @memcpy(self.addrs[0].name[0..name_str.len], name_str);
+                self.addrs[0].name_len = name_str.len;
+                @memcpy(self.addrs[0].ip[0..n], prefs_buf[0..n]);
+                self.addrs[0].ip_len = n;
+                self.addr_count = 1;
+                self.selected_addr = 0;
+                fs.saveAddrs(base, &self.addrs, self.addr_count, 0);
+            }
+        }
+    }
+    // Set ip_field from selected address for sync submission.
+    if (self.addr_count > 0) {
+        const sel = &self.addrs[self.selected_addr];
+        self.ip_field.setDefault(sel.ip[0..sel.ip_len]);
+    } else {
+        self.ip_field.setDefault("192.168.1.100");
     }
     if (comptime is_android) {
         self.bio_available = ui.biometricIsAvailable() != 0;
@@ -302,6 +339,7 @@ pub fn update(self: *Self) void {
     const dt = rl.getFrameTime();
     self.delete_confirm.tick(dt);
     self.detail_delete_confirm.tick(dt);
+    self.manage_delete_confirm.tick(dt);
     if (self.copy_feedback_timer > 0) {
         self.copy_feedback_timer -= rl.getFrameTime();
         // Clear the clipboard as soon as the toast timer expires.
@@ -328,6 +366,7 @@ pub fn update(self: *Self) void {
         .sync_setup => self.inputSyncSetup(c),
         .sync_running => self.inputSyncRunning(c),
         .sync_result => self.inputSyncResult(c),
+        .address_manage => self.inputAddressManage(c),
     }
 
     // Draw
@@ -344,6 +383,7 @@ pub fn update(self: *Self) void {
         .sync_setup => self.drawSyncSetup(c),
         .sync_running => self.drawSyncRunning(c),
         .sync_result => self.drawSyncResult(c),
+        .address_manage => self.drawAddressManage(c),
     }
 }
 
@@ -1549,6 +1589,44 @@ fn drawPwGen(self: *Self, c: Ctx) void {
     }
 }
 
+fn syncSetupLayout(self: *const Self, c: Ctx) struct {
+    fw: i32,
+    title_y: i32,
+    sub_y: i32,
+    server_label_y: i32,
+    dropdown_y: i32,
+    manage_btn_y: i32,
+    pw_label_y: i32,
+    pw_field_y: i32,
+    submit_btn_y: i32,
+    create_btn_y: i32,
+} {
+    const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
+    const fw = c.cw() - 2 * c.L.pad;
+    const title_y = form_top;
+    const sub_y = title_y + c.L.fs_hdr + c.L.pad;
+    const server_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
+    const dropdown_y = server_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+    const manage_btn_h = @divTrunc(c.L.btn_h * 2, 3);
+    const manage_btn_y = dropdown_y + c.L.fh + c.L.fs_small + @divTrunc(c.L.pad, 2);
+    const pw_label_y = manage_btn_y + manage_btn_h + c.L.pad;
+    const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+    const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
+    const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
+    return .{
+        .fw = fw,
+        .title_y = title_y,
+        .sub_y = sub_y,
+        .server_label_y = server_label_y,
+        .dropdown_y = dropdown_y,
+        .manage_btn_y = manage_btn_y,
+        .pw_label_y = pw_label_y,
+        .pw_field_y = pw_field_y,
+        .submit_btn_y = submit_btn_y,
+        .create_btn_y = create_btn_y,
+    };
+}
+
 fn inputSyncSetup(self: *Self, c: Ctx) void {
     // ---- Biometric pre-fill poll (Android, sync-from-browser only) ----
     if (comptime is_android) {
@@ -1556,8 +1634,6 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
             var rbuf: [ui.max_field + 1]u8 = std.mem.zeroes([ui.max_field + 1]u8);
             const poll = ui.pollBiometricResult(&rbuf, @intCast(rbuf.len));
             if (poll > 0) {
-                // Success: fill the password field; stay on the form so the
-                // user can confirm/edit the IP before pressing Sync.
                 self.sync_bio_pending = false;
                 const n: usize = @intCast(poll - 1);
                 self.sync_pw_field.len = n;
@@ -1565,45 +1641,80 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
                 @memset(&rbuf, 0);
                 self.sync_pw_err = false;
             } else if (poll < 0) {
-                // Cancelled — fall back to manual password entry.
                 self.sync_bio_pending = false;
             }
-            // While pending, block other input so the user waits for the prompt.
             if (self.sync_bio_pending) return;
         }
     }
 
-    const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
-    const fw = c.cw() - 2 * c.L.pad;
-    const title_y = form_top;
-    const sub_y = title_y + c.L.fs_hdr + c.L.pad;
-    const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
-    const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
-    const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
-    const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
-    const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
+    const ly = self.syncSetupLayout(c);
 
+    // ---- Back button (when reached from browser) ----
     const android_back_swipe = c.back;
     const sync_back = (c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) or android_back_swipe;
     if (self.sync_from_browser and sync_back) {
         self.sync_from_browser = false;
         self.sync_bio_pending = false;
         self.sync_pw_field.zeroAndClear();
+        self.addr_dropdown_open = false;
         self.phase = .browser;
+        return;
     }
 
-    if (rl.isMouseButtonPressed(.left) and self.sync_pending_field == null) {
-        if (ui.inRect(c.cmx, c.my, c.L.pad, ip_field_y, fw, c.L.fh)) {
-            self.sync_focus_ip = true;
-            if (comptime is_android) {
-                self.ip_field.showDialog("Server IP", false);
-                self.sync_pending_field = true;
+    // ---- Dropdown open: handle item selection or close ----
+    if (self.addr_dropdown_open) {
+        if (c.is_tap) {
+            // Check if tap is on a dropdown item
+            var handled = false;
+            const dropdown_item_h = c.L.fh;
+            const dropdown_list_y = ly.dropdown_y + c.L.fh;
+            for (0..self.addr_count) |i| {
+                const item_y = dropdown_list_y + @as(i32, @intCast(i)) * dropdown_item_h;
+                if (ui.inRect(c.cmx, c.my, c.L.pad, item_y, ly.fw, dropdown_item_h)) {
+                    self.selected_addr = i;
+                    // Fill ip_field from selected address
+                    const sel = &self.addrs[i];
+                    self.ip_field.len = sel.ip_len;
+                    @memcpy(self.ip_field.buf[0..sel.ip_len], sel.ip[0..sel.ip_len]);
+                    self.addr_dropdown_open = false;
+                    self.sync_ip_err = false;
+                    handled = true;
+                    break;
+                }
             }
-        } else if (ui.inRect(c.cmx, c.my, c.L.pad, pw_field_y, fw, c.L.fh)) {
+            if (!handled) {
+                // Tap outside dropdown — close it
+                self.addr_dropdown_open = false;
+            }
+        }
+        return; // Block other input while dropdown is open
+    }
+
+    // ---- Normal (dropdown closed) input ----
+    if (c.is_tap and self.sync_pending_field == null) {
+        // Tap on dropdown area -> open dropdown (if we have addresses)
+        if (ui.inRect(c.cmx, c.my, c.L.pad, ly.dropdown_y, ly.fw, c.L.fh)) {
+            if (self.addr_count > 0) {
+                self.addr_dropdown_open = true;
+            }
+        }
+        // Tap on "Manage Addresses" button
+        else if (ui.inRect(c.cmx, c.my, c.L.pad, ly.manage_btn_y, ly.fw, @divTrunc(c.L.btn_h * 2, 3))) {
+            self.addr_dropdown_open = false;
+            self.manage_err = null;
+            self.manage_name_field = .{};
+            self.manage_ip_field = .{};
+            self.manage_focus_name = true;
+            self.manage_pending_field = null;
+            self.manage_delete_confirm.reset();
+            self.manage_scroll = 0;
+            self.phase = .address_manage;
+        }
+        // Tap on password field
+        else if (ui.inRect(c.cmx, c.my, c.L.pad, ly.pw_field_y, ly.fw, c.L.fh)) {
             self.sync_focus_ip = false;
             if (comptime is_android) {
                 if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
-                    // "Use biometrics" button tapped — trigger auth.
                     ui.biometricAuthenticate();
                     self.sync_bio_pending = true;
                     self.sync_pw_err = false;
@@ -1615,33 +1726,31 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
         }
     }
 
+    // Poll Android text input dialog (password only now — IP comes from dropdown)
     if (comptime is_android) {
-        if (self.sync_pending_field) |is_ip| {
+        if (self.sync_pending_field) |_| {
             var rbuf: [ui.max_field + 1]u8 = undefined;
             const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
             if (r > 0) {
-                const field = if (is_ip) &self.ip_field else &self.sync_pw_field;
                 const n: usize = @intCast(r - 1);
-                field.len = n;
-                @memcpy(field.buf[0..n], rbuf[0..n]);
+                self.sync_pw_field.len = n;
+                @memcpy(self.sync_pw_field.buf[0..n], rbuf[0..n]);
                 self.sync_pending_field = null;
             } else if (r < 0) {
                 self.sync_pending_field = null;
             }
         }
     } else {
-        if (rl.isKeyPressed(.tab)) self.sync_focus_ip = !self.sync_focus_ip;
-        const active = if (self.sync_focus_ip) &self.ip_field else &self.sync_pw_field;
-        if (rl.isKeyPressed(.backspace)) active.pop();
+        // Desktop: keyboard input for password field only
+        if (rl.isKeyPressed(.backspace)) self.sync_pw_field.pop();
         var ch = rl.getCharPressed();
         while (ch != 0) : (ch = rl.getCharPressed()) {
-            if (ch >= 32 and ch < 127) active.append(@intCast(ch));
+            if (ch >= 32 and ch < 127) self.sync_pw_field.append(@intCast(ch));
         }
     }
 
     // Create new local DB (first use only)
-    const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
-    if (self.first_use and c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, create_btn_y, fw, c.L.btn_h)) {
+    if (self.first_use and c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, ly.create_btn_y, ly.fw, c.L.btn_h)) {
         create_db: {
             if (self.sync_pw_field.len == 0) {
                 self.sync_pw_err = true;
@@ -1677,25 +1786,30 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     }
 
     // Sync / Fetch submit
-    const clicked_submit = rl.isMouseButtonPressed(.left) and
-        ui.inRect(c.cmx, c.my, c.L.pad, submit_btn_y, fw, c.L.btn_h);
+    const clicked_submit = c.is_tap and
+        ui.inRect(c.cmx, c.my, c.L.pad, ly.submit_btn_y, ly.fw, c.L.btn_h);
     if (clicked_submit or rl.isKeyPressed(.enter)) {
         if (self.ip_field.len == 0 or self.sync_pw_field.len == 0) {
             self.sync_ip_err = self.ip_field.len == 0;
             self.sync_pw_err = self.sync_pw_field.len == 0;
-            self.sync_err = "Please enter IP and password.";
+            if (self.ip_field.len == 0 and self.addr_count == 0)
+                self.sync_err = "Add a server address first."
+            else if (self.ip_field.len == 0)
+                self.sync_err = "Select a server address."
+            else
+                self.sync_err = "Please enter a password.";
         } else {
             @memcpy(sync.g_ip[0..self.ip_field.len], self.ip_field.buf[0..self.ip_field.len]);
             sync.g_ip_len = self.ip_field.len;
             @memcpy(sync.g_pw[0..self.sync_pw_field.len], self.sync_pw_field.buf[0..self.sync_pw_field.len]);
             sync.g_pw_len = self.sync_pw_field.len;
-            // Zero the field immediately — the password is now in sync.g_pw.
             self.sync_pw_field.zeroAndClear();
             sync.g_status.store(.connecting, .release);
-            save_prefs: {
-                var base = fs.openBaseDir() catch break :save_prefs;
+            // Save selected address index
+            save_addrs: {
+                var base = fs.openBaseDir() catch break :save_addrs;
                 defer if (comptime is_android) base.close();
-                fs.savePrefs(base, self.ip_field.slice());
+                fs.saveAddrs(base, &self.addrs, self.addr_count, self.selected_addr);
             }
             if (std.Thread.spawn(.{}, sync.syncThread, .{})) |thread| {
                 thread.detach();
@@ -2274,61 +2388,399 @@ fn drawHistory(self: *Self, c: Ctx) void {
 }
 
 fn drawSyncSetup(self: *Self, c: Ctx) void {
-    const form_top = if (self.sync_from_browser) c.L.hdr_h + c.L.pad else c.L.pad * 2;
-    const fw = c.cw() - 2 * c.L.pad;
-    const title_y = form_top;
-    const sub_y = title_y + c.L.fs_hdr + c.L.pad;
-    const ip_label_y = sub_y + c.L.fs_label + c.L.pad * 2;
-    const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
-    const pw_label_y = ip_field_y + c.L.fh + c.L.pad;
-    const pw_field_y = pw_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
-    const submit_btn_y = pw_field_y + c.L.fh + c.L.pad * 2;
-    const create_btn_y = submit_btn_y + c.L.btn_h + c.L.pad;
+    const ly = self.syncSetupLayout(c);
+    const manage_btn_h = @divTrunc(c.L.btn_h * 2, 3);
 
-    ui.drawText("Loki Sync", c.cx() + c.L.pad, title_y, c.L.fs_hdr, .white);
+    ui.drawText("Loki Sync", c.cx() + c.L.pad, ly.title_y, c.L.fs_hdr, .white);
 
     const subtitle: [:0]const u8 = if (self.first_use)
         "First use: fetch the database from server"
     else
         "Sync database with server";
-    ui.drawText(subtitle, c.cx() + c.L.pad, sub_y, c.L.fs_label, .gray);
+    ui.drawText(subtitle, c.cx() + c.L.pad, ly.sub_y, c.L.fs_label, .gray);
 
-    ui.drawText("Server IP", c.cx() + c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
-    ui.drawTextField(&self.ip_field, c.cx() + c.L.pad, ip_field_y, fw, c.L.fh, self.sync_focus_ip, self.sync_ip_err);
+    // ---- Server dropdown ----
+    ui.drawText("Server", c.cx() + c.L.pad, ly.server_label_y, c.L.fs_label, .light_gray);
 
-    ui.drawText("Password", c.cx() + c.L.pad, pw_label_y, c.L.fs_label, .light_gray);
+    // Draw dropdown button
+    {
+        const border: rl.Color = if (self.sync_ip_err) .{ .r = 220, .g = 50, .b = 50, .a = 255 } else if (self.addr_dropdown_open) .sky_blue else .gray;
+        const bg: rl.Color = if (self.addr_dropdown_open) .white else .light_gray;
+        rl.drawRectangle(c.cx() + c.L.pad, ly.dropdown_y, ly.fw, c.L.fh, bg);
+        rl.drawRectangleLines(c.cx() + c.L.pad, ly.dropdown_y, ly.fw, c.L.fh, border);
+
+        const fs_dd = ui.fsByHeight(c.L.fh);
+        const pad_dd = @max(6, @divTrunc(c.L.fh, 8));
+        if (self.addr_count > 0) {
+            var lbl_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+            const lbl = self.addrs[self.selected_addr].displayLabel(&lbl_buf);
+            ui.drawText(lbl, c.cx() + c.L.pad + pad_dd, ly.dropdown_y + @divTrunc(c.L.fh - fs_dd, 2), fs_dd, .dark_gray);
+        } else {
+            ui.drawText("(no addresses)", c.cx() + c.L.pad + pad_dd, ly.dropdown_y + @divTrunc(c.L.fh - fs_dd, 2), fs_dd, .gray);
+        }
+        // Down arrow indicator
+        const arrow: [:0]const u8 = if (self.addr_dropdown_open) "^" else "v";
+        const aw = ui.measureText(arrow, fs_dd);
+        ui.drawText(arrow, c.cx() + c.L.pad + ly.fw - pad_dd - aw, ly.dropdown_y + @divTrunc(c.L.fh - fs_dd, 2), fs_dd, .dark_gray);
+
+        // Show IP of selected address below the dropdown button
+        if (self.addr_count > 0 and !self.addr_dropdown_open) {
+            const sel = &self.addrs[self.selected_addr];
+            if (sel.ip_len > 0) {
+                var ip_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                @memcpy(ip_buf[0..sel.ip_len], sel.ip[0..sel.ip_len]);
+                ui.drawText(&ip_buf, c.cx() + c.L.pad + pad_dd + ly.fw + pad_dd - ly.fw, ly.dropdown_y + c.L.fh + 2, c.L.fs_small, .gray);
+            }
+        }
+    }
+
+    // "Manage Addresses" button
+    ui.drawButton("Manage Addresses", c.cx() + c.L.pad, ly.manage_btn_y, ly.fw, manage_btn_h, .{ .r = 50, .g = 60, .b = 80, .a = 255 });
+
+    // ---- Password ----
+    ui.drawText("Password", c.cx() + c.L.pad, ly.pw_label_y, c.L.fs_label, .light_gray);
     if (comptime is_android) {
         if (self.sync_bio_pending) {
-            ui.drawButton("Waiting for biometrics...", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
+            ui.drawButton("Waiting for biometrics...", c.cx() + c.L.pad, ly.pw_field_y, ly.fw, c.L.fh, .{ .r = 40, .g = 80, .b = 140, .a = 180 });
         } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len == 0) {
-            ui.drawButton("Use biometrics", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 40, .g = 90, .b = 160, .a = 255 });
+            ui.drawButton("Use biometrics", c.cx() + c.L.pad, ly.pw_field_y, ly.fw, c.L.fh, .{ .r = 40, .g = 90, .b = 160, .a = 255 });
         } else if (self.sync_from_browser and self.bio_enrolled and self.sync_pw_field.len > 0) {
-            ui.drawButton("Password set via biometrics", c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, .{ .r = 30, .g = 80, .b = 50, .a = 255 });
+            ui.drawButton("Password set via biometrics", c.cx() + c.L.pad, ly.pw_field_y, ly.fw, c.L.fh, .{ .r = 30, .g = 80, .b = 50, .a = 255 });
         } else {
-            ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+            ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, ly.pw_field_y, ly.fw, c.L.fh, true, self.sync_pw_err);
         }
     } else {
-        ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, pw_field_y, fw, c.L.fh, !self.sync_focus_ip, self.sync_pw_err);
+        ui.drawTextField(&self.sync_pw_field, c.cx() + c.L.pad, ly.pw_field_y, ly.fw, c.L.fh, true, self.sync_pw_err);
     }
 
+    // ---- Buttons ----
     const submit_label: [:0]const u8 = if (self.first_use) "Fetch" else "Sync";
-    ui.drawButton(submit_label, c.cx() + c.L.pad, submit_btn_y, fw, c.L.btn_h, .sky_blue);
+    ui.drawButton(submit_label, c.cx() + c.L.pad, ly.submit_btn_y, ly.fw, c.L.btn_h, .sky_blue);
 
     if (self.first_use) {
-        ui.drawButton("Create new (no server)", c.cx() + c.L.pad, create_btn_y, fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
+        ui.drawButton("Create new (no server)", c.cx() + c.L.pad, ly.create_btn_y, ly.fw, c.L.btn_h, .{ .r = 50, .g = 100, .b = 60, .a = 255 });
     }
 
-    const err_y = create_btn_y + c.L.btn_h + c.L.pad;
+    const err_y = ly.create_btn_y + c.L.btn_h + c.L.pad;
     if (self.sync_err) |msg| ui.drawText(msg, c.cx() + c.L.pad, err_y, c.L.fs_label, .orange);
 
     if (comptime !is_android) {
-        ui.drawText("Tab: switch field   Enter: submit", c.cx() + c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
+        ui.drawText("Enter: submit", c.cx() + c.L.pad, c.sh - c.L.fs_small - c.L.pad, c.L.fs_small, .dark_gray);
     }
 
     // Back button in header when reached from browser
     if (self.sync_from_browser) {
         rl.drawRectangle(c.cx(), 0, c.cw(), c.L.hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
         ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(c.L.hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+    }
+
+    // ---- Dropdown overlay (drawn last, on top of everything) ----
+    if (self.addr_dropdown_open and self.addr_count > 0) {
+        const dropdown_item_h = c.L.fh;
+        const dropdown_list_y = ly.dropdown_y + c.L.fh;
+        const dropdown_total_h = @as(i32, @intCast(self.addr_count)) * dropdown_item_h;
+
+        // Semi-transparent backdrop behind dropdown
+        rl.drawRectangle(c.cx() + c.L.pad, dropdown_list_y, ly.fw, dropdown_total_h, .{ .r = 30, .g = 30, .b = 40, .a = 245 });
+        rl.drawRectangleLines(c.cx() + c.L.pad, dropdown_list_y, ly.fw, dropdown_total_h, .sky_blue);
+
+        const fs_item = ui.fsByHeight(dropdown_item_h);
+        const pad_item = @max(6, @divTrunc(dropdown_item_h, 8));
+        for (0..self.addr_count) |i| {
+            const item_y = dropdown_list_y + @as(i32, @intCast(i)) * dropdown_item_h;
+            const is_selected = (i == self.selected_addr);
+
+            // Highlight selected item
+            if (is_selected) {
+                rl.drawRectangle(c.cx() + c.L.pad + 1, item_y + 1, ly.fw - 2, dropdown_item_h - 2, .{ .r = 40, .g = 80, .b = 120, .a = 200 });
+            }
+
+            // Draw name
+            var name_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+            const display = self.addrs[i].displayLabel(&name_buf);
+            const name_color: rl.Color = if (is_selected) .white else .light_gray;
+            ui.drawText(display, c.cx() + c.L.pad + pad_item, item_y + @divTrunc(dropdown_item_h - fs_item, 4), @divTrunc(fs_item * 4, 5), name_color);
+
+            // Draw IP underneath name (smaller)
+            if (self.addrs[i].ip_len > 0) {
+                var ip_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                @memcpy(ip_buf[0..self.addrs[i].ip_len], self.addrs[i].ip[0..self.addrs[i].ip_len]);
+                ui.drawText(&ip_buf, c.cx() + c.L.pad + pad_item, item_y + @divTrunc(dropdown_item_h, 2), c.L.fs_small, .gray);
+            }
+
+            // Separator line between items
+            if (i + 1 < self.addr_count) {
+                rl.drawRectangle(c.cx() + c.L.pad + pad_item, item_y + dropdown_item_h - 1, ly.fw - 2 * pad_item, 1, .{ .r = 60, .g = 60, .b = 80, .a = 255 });
+            }
+        }
+    }
+}
+
+// ---- Manage Addresses screen ----
+
+fn inputAddressManage(self: *Self, c: Ctx) void {
+    const fw = c.cw() - 2 * c.L.pad;
+    const row_h = c.L.fh + c.L.fs_small + c.L.pad;
+    const hdr_h = c.L.hdr_h;
+
+    // Back button
+    const back_pressed = c.back or (c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, hdr_h));
+    if (back_pressed) {
+        // Sync ip_field from the currently selected address before going back
+        if (self.addr_count > 0 and self.selected_addr < self.addr_count) {
+            const sel = &self.addrs[self.selected_addr];
+            self.ip_field.len = sel.ip_len;
+            @memcpy(self.ip_field.buf[0..sel.ip_len], sel.ip[0..sel.ip_len]);
+        }
+        self.phase = .sync_setup;
+        return;
+    }
+
+    // Poll Android text input dialog
+    if (comptime is_android) {
+        if (self.manage_pending_field) |is_name| {
+            var rbuf: [ui.max_field + 1]u8 = undefined;
+            const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
+            if (r > 0) {
+                const field = if (is_name) &self.manage_name_field else &self.manage_ip_field;
+                const n: usize = @intCast(r - 1);
+                field.len = n;
+                @memcpy(field.buf[0..n], rbuf[0..n]);
+                self.manage_pending_field = null;
+            } else if (r < 0) {
+                self.manage_pending_field = null;
+            }
+        }
+    }
+
+    // Layout for the "add" section at the bottom
+    const list_top = hdr_h + c.L.pad;
+    _ = list_top;
+    const add_section_y = c.sh - (c.L.fh * 2 + c.L.fs_label * 2 + c.L.pad * 3 + c.L.btn_h + c.L.pad);
+
+    // Handle taps on existing address rows (delete buttons)
+    if (c.is_tap and self.manage_pending_field == null) {
+        const content_top = hdr_h + c.L.pad + c.L.fs_hdr + c.L.pad;
+        for (0..self.addr_count) |i| {
+            const ry = content_top + @as(i32, @intCast(i)) * row_h - @as(i32, @intFromFloat(self.manage_scroll));
+            // Delete button area (right side of row)
+            const del_btn_w = c.L.hdr_btn_w;
+            const del_btn_x = c.L.pad + fw - del_btn_w;
+            const del_btn_h = @divTrunc(row_h * 2, 3);
+            const del_btn_y = ry + @divTrunc(row_h - del_btn_h, 2);
+            if (ui.inRect(c.cmx, c.my, del_btn_x, del_btn_y, del_btn_w, del_btn_h)) {
+                if (self.manage_delete_confirm.pending and self.manage_delete_idx == i) {
+                    // Second tap — confirm delete
+                    self.manage_delete_confirm.reset();
+                    // Remove address at index i
+                    if (self.addr_count > 1) {
+                        var j: usize = i;
+                        while (j + 1 < self.addr_count) : (j += 1) {
+                            self.addrs[j] = self.addrs[j + 1];
+                        }
+                        self.addrs[self.addr_count - 1] = .{};
+                    } else {
+                        self.addrs[0] = .{};
+                    }
+                    self.addr_count -|= 1;
+                    // Fix selected_addr
+                    if (self.addr_count == 0) {
+                        self.selected_addr = 0;
+                    } else if (self.selected_addr >= self.addr_count) {
+                        self.selected_addr = self.addr_count - 1;
+                    }
+                    // Save immediately
+                    save_del: {
+                        var base = fs.openBaseDir() catch break :save_del;
+                        defer if (comptime is_android) base.close();
+                        fs.saveAddrs(base, &self.addrs, self.addr_count, self.selected_addr);
+                    }
+                    self.manage_err = null;
+                    break;
+                } else {
+                    // First tap — arm confirmation
+                    self.manage_delete_confirm.arm();
+                    self.manage_delete_idx = i;
+                }
+            }
+        }
+
+        // Tap on Name field
+        const name_label_y = add_section_y;
+        const name_field_y = name_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+        if (ui.inRect(c.cmx, c.my, c.L.pad, name_field_y, fw, c.L.fh)) {
+            self.manage_focus_name = true;
+            if (comptime is_android) {
+                self.manage_name_field.showDialog("Address Name", false);
+                self.manage_pending_field = true;
+            }
+        }
+
+        // Tap on IP field
+        const ip_label_y = name_field_y + c.L.fh + @divTrunc(c.L.pad, 2);
+        const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+        if (ui.inRect(c.cmx, c.my, c.L.pad, ip_field_y, fw, c.L.fh)) {
+            self.manage_focus_name = false;
+            if (comptime is_android) {
+                self.manage_ip_field.showDialog("Server IP", false);
+                self.manage_pending_field = false;
+            }
+        }
+
+        // Tap on "Add" button
+        const add_btn_y = ip_field_y + c.L.fh + c.L.pad;
+        if (ui.inRect(c.cmx, c.my, c.L.pad, add_btn_y, fw, c.L.btn_h)) {
+            if (self.addr_count >= ui.max_addrs) {
+                self.manage_err = "Maximum addresses reached.";
+            } else if (self.manage_ip_field.len == 0) {
+                self.manage_err = "IP address is required.";
+            } else {
+                // Add new address
+                const idx = self.addr_count;
+                self.addrs[idx] = .{};
+                const nlen = @min(self.manage_name_field.len, ui.max_addr_name);
+                @memcpy(self.addrs[idx].name[0..nlen], self.manage_name_field.buf[0..nlen]);
+                self.addrs[idx].name_len = nlen;
+                const ilen = @min(self.manage_ip_field.len, ui.max_field);
+                @memcpy(self.addrs[idx].ip[0..ilen], self.manage_ip_field.buf[0..ilen]);
+                self.addrs[idx].ip_len = ilen;
+                self.addr_count += 1;
+                // Auto-select the new address if it's the first one
+                if (self.addr_count == 1) self.selected_addr = 0;
+                // Save
+                save_add: {
+                    var base = fs.openBaseDir() catch break :save_add;
+                    defer if (comptime is_android) base.close();
+                    fs.saveAddrs(base, &self.addrs, self.addr_count, self.selected_addr);
+                }
+                // Clear input fields
+                self.manage_name_field = .{};
+                self.manage_ip_field = .{};
+                self.manage_err = null;
+            }
+        }
+    }
+
+    // Desktop keyboard input
+    if (comptime !is_android) {
+        if (rl.isKeyPressed(.tab)) self.manage_focus_name = !self.manage_focus_name;
+        const active = if (self.manage_focus_name) &self.manage_name_field else &self.manage_ip_field;
+        if (rl.isKeyPressed(.backspace)) active.pop();
+        var ch = rl.getCharPressed();
+        while (ch != 0) : (ch = rl.getCharPressed()) {
+            if (ch >= 32 and ch < 127) active.append(@intCast(ch));
+        }
+    }
+
+    // Scroll (for long address lists)
+    const content_top = hdr_h + c.L.pad + c.L.fs_hdr + c.L.pad;
+    const total_list_h = @as(i32, @intCast(self.addr_count)) * row_h;
+    const visible_h = add_section_y - content_top;
+    if (total_list_h > visible_h) {
+        self.manage_scroll -= c.wheel * 40;
+        const max_scroll: f32 = @floatFromInt(total_list_h - visible_h);
+        if (self.manage_scroll < 0) self.manage_scroll = 0;
+        if (self.manage_scroll > max_scroll) self.manage_scroll = max_scroll;
+    } else {
+        self.manage_scroll = 0;
+    }
+}
+
+fn drawAddressManage(self: *Self, c: Ctx) void {
+    const fw = c.cw() - 2 * c.L.pad;
+    const row_h = c.L.fh + c.L.fs_small + c.L.pad;
+    const hdr_h = c.L.hdr_h;
+
+    // Header bar
+    rl.drawRectangle(c.cx(), 0, c.cw(), hdr_h, .{ .r = 20, .g = 20, .b = 30, .a = 255 });
+    ui.drawText("< Back", c.cx() + c.L.pad, @divTrunc(hdr_h - c.L.fs_body, 2), c.L.fs_body, .sky_blue);
+
+    // Title
+    const title_y = hdr_h + c.L.pad;
+    ui.drawText("Manage Addresses", c.cx() + c.L.pad, title_y, c.L.fs_hdr, .white);
+
+    // "Add" section layout (anchored to bottom)
+    const add_section_y = c.sh - (c.L.fh * 2 + c.L.fs_label * 2 + c.L.pad * 3 + c.L.btn_h + c.L.pad);
+
+    // Address list
+    const content_top = title_y + c.L.fs_hdr + c.L.pad;
+
+    // Clip region for the list (between content_top and add_section_y)
+    rl.beginScissorMode(c.cx(), content_top, c.cw(), add_section_y - content_top);
+
+    if (self.addr_count == 0) {
+        ui.drawText("No saved addresses.", c.cx() + c.L.pad, content_top + c.L.pad, c.L.fs_label, .gray);
+    } else {
+        for (0..self.addr_count) |i| {
+            const ry = content_top + @as(i32, @intCast(i)) * row_h - @as(i32, @intFromFloat(self.manage_scroll));
+
+            // Skip if off-screen
+            if (ry + row_h < content_top or ry > add_section_y) continue;
+
+            // Row background
+            const row_bg: rl.Color = if (i == self.selected_addr) .{ .r = 30, .g = 50, .b = 70, .a = 255 } else if (i % 2 == 0) .{ .r = 25, .g = 25, .b = 35, .a = 255 } else .{ .r = 30, .g = 30, .b = 40, .a = 255 };
+            rl.drawRectangle(c.cx() + c.L.pad, ry, fw, row_h, row_bg);
+
+            const pad_r = @max(6, @divTrunc(row_h, 8));
+
+            // Name
+            var name_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+            const name_lbl = self.addrs[i].displayLabel(&name_buf);
+            const name_color: rl.Color = if (i == self.selected_addr) .sky_blue else .white;
+            ui.drawText(name_lbl, c.cx() + c.L.pad + pad_r, ry + pad_r, c.L.fs_label, name_color);
+
+            // IP
+            if (self.addrs[i].ip_len > 0) {
+                var ip_buf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
+                @memcpy(ip_buf[0..self.addrs[i].ip_len], self.addrs[i].ip[0..self.addrs[i].ip_len]);
+                ui.drawText(&ip_buf, c.cx() + c.L.pad + pad_r, ry + c.L.fs_label + pad_r + 2, c.L.fs_small, .gray);
+            }
+
+            // Delete button
+            const del_btn_w = c.L.hdr_btn_w;
+            const del_btn_x = c.cx() + c.L.pad + fw - del_btn_w;
+            const del_btn_h = @divTrunc(row_h * 2, 3);
+            const del_btn_y = ry + @divTrunc(row_h - del_btn_h, 2);
+            const del_label: [:0]const u8 = if (self.manage_delete_confirm.pending and self.manage_delete_idx == i) "Confirm?" else "Delete";
+            const del_color: rl.Color = if (self.manage_delete_confirm.pending and self.manage_delete_idx == i) .{ .r = 220, .g = 50, .b = 50, .a = 255 } else .{ .r = 120, .g = 40, .b = 40, .a = 255 };
+            ui.drawButton(del_label, del_btn_x, del_btn_y, del_btn_w, del_btn_h, del_color);
+
+            // Separator
+            rl.drawRectangle(c.cx() + c.L.pad, ry + row_h - 1, fw, 1, .{ .r = 50, .g = 50, .b = 60, .a = 255 });
+        }
+    }
+
+    rl.endScissorMode();
+
+    // ---- Add section (fixed at bottom) ----
+    // Background for add section
+    rl.drawRectangle(c.cx(), add_section_y - c.L.pad, c.cw(), c.sh - add_section_y + c.L.pad, .{ .r = 18, .g = 18, .b = 25, .a = 255 });
+    rl.drawRectangle(c.cx(), add_section_y - c.L.pad, c.cw(), 1, .{ .r = 50, .g = 50, .b = 60, .a = 255 });
+
+    const name_label_y = add_section_y;
+    ui.drawText("Name", c.cx() + c.L.pad, name_label_y, c.L.fs_label, .light_gray);
+    const name_field_y = name_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+    ui.drawTextField(&self.manage_name_field, c.cx() + c.L.pad, name_field_y, fw, c.L.fh, self.manage_focus_name, false);
+
+    const ip_label_y = name_field_y + c.L.fh + @divTrunc(c.L.pad, 2);
+    ui.drawText("IP Address", c.cx() + c.L.pad, ip_label_y, c.L.fs_label, .light_gray);
+    const ip_field_y = ip_label_y + c.L.fs_label + @divTrunc(c.L.pad, 2);
+    ui.drawTextField(&self.manage_ip_field, c.cx() + c.L.pad, ip_field_y, fw, c.L.fh, !self.manage_focus_name, false);
+
+    const add_btn_y = ip_field_y + c.L.fh + c.L.pad;
+    if (self.addr_count >= ui.max_addrs) {
+        ui.drawButton("List Full", c.cx() + c.L.pad, add_btn_y, fw, c.L.btn_h, .{ .r = 60, .g = 60, .b = 60, .a = 255 });
+    } else {
+        ui.drawButton("Add", c.cx() + c.L.pad, add_btn_y, fw, c.L.btn_h, .{ .r = 30, .g = 130, .b = 80, .a = 255 });
+    }
+
+    // Error message
+    if (self.manage_err) |msg| {
+        ui.drawText(msg, c.cx() + c.L.pad, add_btn_y + c.L.btn_h + @divTrunc(c.L.pad, 2), c.L.fs_small, .orange);
+    }
+
+    if (comptime !is_android) {
+        ui.drawText("Tab: switch field", c.cx() + c.L.pad, c.sh - c.L.fs_small - 4, c.L.fs_small, .dark_gray);
     }
 }
 

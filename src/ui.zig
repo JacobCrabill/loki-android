@@ -172,6 +172,43 @@ pub fn rowLessThan(_: void, a: BrowserRow, b: BrowserRow) bool {
     return std.mem.order(u8, a.title, b.title) == .lt;
 }
 
+// ---- Server address book ----
+
+pub const max_addrs = 16;
+pub const max_addr_name = 63;
+
+pub const ServerAddr = struct {
+    name: [max_addr_name + 1]u8 = std.mem.zeroes([max_addr_name + 1]u8),
+    name_len: usize = 0,
+    ip: [max_field + 1]u8 = std.mem.zeroes([max_field + 1]u8),
+    ip_len: usize = 0,
+
+    pub fn nameSlice(self: *const ServerAddr) []const u8 {
+        return self.name[0..self.name_len];
+    }
+
+    pub fn ipSlice(self: *const ServerAddr) []const u8 {
+        return self.ip[0..self.ip_len];
+    }
+
+    /// Return the display label: name if set, otherwise IP, otherwise "(empty)".
+    pub fn displayLabel(self: *const ServerAddr, buf: *[max_field + 1:0]u8) [:0]const u8 {
+        if (self.name_len > 0) {
+            @memcpy(buf[0..self.name_len], self.name[0..self.name_len]);
+            buf[self.name_len] = 0;
+            return buf[0..self.name_len :0];
+        } else if (self.ip_len > 0) {
+            @memcpy(buf[0..self.ip_len], self.ip[0..self.ip_len]);
+            buf[self.ip_len] = 0;
+            return buf[0..self.ip_len :0];
+        } else {
+            @memcpy(buf[0..7], "(empty)");
+            buf[7] = 0;
+            return buf[0..7 :0];
+        }
+    }
+};
+
 // ---- App phases ----
 
 pub const Phase = enum {
@@ -183,6 +220,7 @@ pub const Phase = enum {
     sync_setup,
     sync_running,
     sync_result,
+    address_manage,
 };
 
 // ---- Edit / detail field metadata ----
