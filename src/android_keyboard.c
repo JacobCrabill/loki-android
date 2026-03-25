@@ -108,7 +108,140 @@ static JNIEnv *attach(int *out_detach) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API (called from Zig)
+// IME ring buffer  (written: UI thread  /  read: GL thread)
+// ---------------------------------------------------------------------------
+
+#define IME_BUF_SIZE 256
+
+static char       g_ime_chars[IME_BUF_SIZE];
+static atomic_int g_ime_read_pos  = 0;   // consumer index (GL thread)
+static atomic_int g_ime_write_pos = 0;   // producer index (UI thread)
+static atomic_int g_ime_backspaces = 0;  // pending delete-before count
+
+// Push a single byte into the ring buffer.
+// Called only from UI thread; no concurrent writers.
+static void ime_push_byte(char c) {
+    int wp   = atomic_load_explicit(&g_ime_write_pos, memory_order_relaxed);
+    int next = (wp + 1) % IME_BUF_SIZE;
+    if (next == atomic_load_explicit(&g_ime_read_pos, memory_order_acquire))
+        return; // buffer full — drop rather than block
+    g_ime_chars[wp] = c;
+    atomic_store_explicit(&g_ime_write_pos, next, memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
+// JNI callbacks invoked by KeyboardInputConnection (UI thread)
+// ---------------------------------------------------------------------------
+
+// Called by KeyboardInputConnection.nativeCommitText(String text).
+// Pushes the UTF-8 bytes of 'text' into the ring buffer.
+JNIEXPORT void JNICALL
+Java_com_zig_loki_KeyboardInputConnection_nativeCommitText(
+    JNIEnv *env, jclass clazz, jstring text)
+{
+    (void)clazz;
+    if (text == NULL) return;
+    const char *str = (*env)->GetStringUTFChars(env, text, NULL);
+    if (str) {
+        for (const char *p = str; *p; ++p)
+            ime_push_byte(*p);
+        (*env)->ReleaseStringUTFChars(env, text, str);
+    }
+}
+
+// Called by KeyboardInputConnection.nativeDeleteChars(int count).
+// Increments the pending backspace counter.
+JNIEXPORT void JNICALL
+Java_com_zig_loki_KeyboardInputConnection_nativeDeleteChars(
+    JNIEnv *env, jclass clazz, jint count)
+{
+    (void)env; (void)clazz;
+    if (count > 0)
+        atomic_fetch_add_explicit(&g_ime_backspaces, (int)count,
+                                  memory_order_release);
+}
+
+// Called by KeyboardInputConnection.nativeOnEnter().
+// Hides the keyboard so the user can tap the action button.
+// We are already on the UI thread here.
+JNIEXPORT void JNICALL
+Java_com_zig_loki_KeyboardInputConnection_nativeOnEnter(
+    JNIEnv *env, jclass clazz)
+{
+    (void)clazz;
+    jclass    cls      = find_class(env, "com.zig.loki.MainActivity");
+    if (!cls) return;
+    jmethodID hide     = (*env)->GetMethodID(env, cls,
+                             "hideSoftKeyboard", "()V");
+    jobject   activity = GetAndroidApp()->activity->clazz;
+    if (hide)
+        (*env)->CallVoidMethod(env, activity, hide);
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+// ---------------------------------------------------------------------------
+// Public API — real-time soft-keyboard (called from Zig)
+// ---------------------------------------------------------------------------
+
+// Show the soft keyboard.
+// is_password: non-zero to request password input type (no suggestions).
+void showSoftKeyboard(int is_password) {
+    int     detach;
+    JNIEnv *env      = attach(&detach);
+    JavaVM *vm       = GetAndroidApp()->activity->vm;
+
+    jclass    cls      = find_class(env, "com.zig.loki.MainActivity");
+    jmethodID show     = cls ? (*env)->GetMethodID(env, cls,
+                                    "showSoftKeyboard", "(Z)V") : NULL;
+    jobject   activity = GetAndroidApp()->activity->clazz;
+
+    if (show)
+        (*env)->CallVoidMethod(env, activity, show,
+                               (jboolean)(is_password != 0));
+
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (detach) (*vm)->DetachCurrentThread(vm);
+}
+
+// Hide the soft keyboard.
+void hideSoftKeyboard(void) {
+    int     detach;
+    JNIEnv *env      = attach(&detach);
+    JavaVM *vm       = GetAndroidApp()->activity->vm;
+
+    jclass    cls      = find_class(env, "com.zig.loki.MainActivity");
+    jmethodID hide     = cls ? (*env)->GetMethodID(env, cls,
+                                    "hideSoftKeyboard", "()V") : NULL;
+    jobject   activity = GetAndroidApp()->activity->clazz;
+
+    if (hide)
+        (*env)->CallVoidMethod(env, activity, hide);
+
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    if (detach) (*vm)->DetachCurrentThread(vm);
+}
+
+// Return the next character from the IME ring buffer, or 0 if empty.
+// Called from the GL render thread every frame.
+int pollImeChar(void) {
+    int rp = atomic_load_explicit(&g_ime_read_pos, memory_order_acquire);
+    if (rp == atomic_load_explicit(&g_ime_write_pos, memory_order_acquire))
+        return 0; // empty
+    char c = g_ime_chars[rp];
+    atomic_store_explicit(&g_ime_read_pos,
+                          (rp + 1) % IME_BUF_SIZE,
+                          memory_order_release);
+    return (unsigned char)c;
+}
+
+// Return and clear the pending backspace count.
+// Called from the GL render thread every frame.
+int pollImeBackspace(void) {
+    return atomic_exchange_explicit(&g_ime_backspaces, 0, memory_order_acq_rel);
+}
+
+// ---------------------------------------------------------------------------
+// Public API — AlertDialog text input (called from Zig)
 // ---------------------------------------------------------------------------
 
 // Schedule a text-input dialog on the UI thread and return immediately.

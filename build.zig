@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
         apk.setAndroidManifest(b.path("android/AndroidManifest.xml"));
         apk.addResourceDirectory(b.path("android/res"));
         apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/TextInput.java") });
+        apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/KeyboardInputConnection.java") });
         apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/MainActivity.java") });
         apk.addJavaSourceFile(.{ .file = b.path("android/java/com/zig/loki/Biometric.java") });
 

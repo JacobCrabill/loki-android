@@ -1653,6 +1653,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const android_back_swipe = c.back;
     const sync_back = (c.is_tap and ui.inRect(c.cmx, c.my, 0, 0, c.L.back_btn_w, c.L.hdr_h)) or android_back_swipe;
     if (self.sync_from_browser and sync_back) {
+        if (comptime is_android) ui.hideSoftKeyboard();
         self.sync_from_browser = false;
         self.sync_bio_pending = false;
         self.sync_pw_field.zeroAndClear();
@@ -1691,7 +1692,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     }
 
     // ---- Normal (dropdown closed) input ----
-    if (c.is_tap and self.sync_pending_field == null) {
+    if (c.is_tap) {
         // Tap on dropdown area -> open dropdown (if we have addresses)
         if (ui.inRect(c.cmx, c.my, c.L.pad, ly.dropdown_y, ly.fw, c.L.fh)) {
             if (self.addr_count > 0) {
@@ -1700,6 +1701,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
         }
         // Tap on "Manage Addresses" button
         else if (ui.inRect(c.cmx, c.my, c.L.pad, ly.manage_btn_y, ly.fw, @divTrunc(c.L.btn_h * 2, 3))) {
+            if (comptime is_android) ui.hideSoftKeyboard();
             self.addr_dropdown_open = false;
             self.manage_err = null;
             self.manage_name_field = .{};
@@ -1719,26 +1721,20 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
                     self.sync_bio_pending = true;
                     self.sync_pw_err = false;
                 } else {
-                    self.sync_pw_field.showDialog("Password", true);
-                    self.sync_pending_field = false;
+                    ui.showSoftKeyboard(1); // is_password = true
                 }
             }
         }
     }
 
-    // Poll Android text input dialog (password only now — IP comes from dropdown)
+    // Android: drain the IME ring buffer into the password field each frame.
+    // Same per-frame structure as the desktop path below.
     if (comptime is_android) {
-        if (self.sync_pending_field) |_| {
-            var rbuf: [ui.max_field + 1]u8 = undefined;
-            const r = ui.pollTextInputDialog(&rbuf, @intCast(rbuf.len));
-            if (r > 0) {
-                const n: usize = @intCast(r - 1);
-                self.sync_pw_field.len = n;
-                @memcpy(self.sync_pw_field.buf[0..n], rbuf[0..n]);
-                self.sync_pending_field = null;
-            } else if (r < 0) {
-                self.sync_pending_field = null;
-            }
+        var bs = ui.pollImeBackspace();
+        while (bs > 0) : (bs -= 1) self.sync_pw_field.pop();
+        var ch = ui.pollImeChar();
+        while (ch != 0) : (ch = ui.pollImeChar()) {
+            if (ch >= 32 and ch < 127) self.sync_pw_field.append(@intCast(ch));
         }
     } else {
         // Desktop: keyboard input for password field only
@@ -1751,6 +1747,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
 
     // Create new local DB (first use only)
     if (self.first_use and c.is_tap and ui.inRect(c.cmx, c.my, c.L.pad, ly.create_btn_y, ly.fw, c.L.btn_h)) {
+        if (comptime is_android) ui.hideSoftKeyboard();
         create_db: {
             if (self.sync_pw_field.len == 0) {
                 self.sync_pw_err = true;
@@ -1789,6 +1786,7 @@ fn inputSyncSetup(self: *Self, c: Ctx) void {
     const clicked_submit = c.is_tap and
         ui.inRect(c.cmx, c.my, c.L.pad, ly.submit_btn_y, ly.fw, c.L.btn_h);
     if (clicked_submit or rl.isKeyPressed(.enter)) {
+        if (comptime is_android) ui.hideSoftKeyboard();
         if (self.ip_field.len == 0 or self.sync_pw_field.len == 0) {
             self.sync_ip_err = self.ip_field.len == 0;
             self.sync_pw_err = self.sync_pw_field.len == 0;

@@ -17,6 +17,18 @@ pub extern fn showTextInputDialog(title: [*c]const u8, current: [*c]const u8, is
 pub extern fn showTextInputDialogMultiline(title: [*c]const u8, current: [*c]const u8) void;
 pub extern fn pollTextInputDialog(out_buf: [*]u8, buf_size: c_int) c_int;
 
+// ---- Android real-time soft-keyboard bridge ----
+//
+// showSoftKeyboard() raises the on-screen keyboard for the focused field.
+// The IME delivers text through KeyboardInputConnection (Java) → JNI callbacks
+// in android_keyboard.c, which buffer chars into a ring.  The render loop
+// drains the ring every frame with pollImeChar() / pollImeBackspace().
+
+pub extern fn showSoftKeyboard(is_password: c_int) void;
+pub extern fn hideSoftKeyboard() void;
+pub extern fn pollImeChar() c_int;
+pub extern fn pollImeBackspace() c_int;
+
 // ---- Android biometric unlock ----
 
 pub extern fn biometricIsAvailable() c_int;
