@@ -12,6 +12,10 @@ const sync = @import("sync.zig");
 const is_android = ui.is_android;
 const Self = @This();
 
+const clipboard_toast_duration_s: f32 = 1.5;
+const clipboard_timeout_s: f32 = 30.0;
+const auto_lock_time_s: f32 = 300.0;
+
 // ---- Two-tap confirmation button ----
 
 const ConfirmButton = struct {
@@ -178,8 +182,9 @@ search_field: ui.TextField = .{},
 search_pending: bool = false,
 search_focused: bool = false,
 
-// Clipboard toast
-copy_feedback_timer: f32 = 0,
+/// Clipboard toast
+copy_feedback_timer_s: f32 = 0,
+clip_clear_timeout_s: f32 = 0,
 
 // Browser toast (informational messages that show briefly in the browser view)
 browser_toast: ?[:0]const u8 = null,
@@ -331,7 +336,7 @@ pub fn update(self: *Self) void {
         .browser, .detail, .edit, .history => true,
         else => false,
     };
-    if (unlocked and self.db != null and now - self.last_interaction_time > 300.0) {
+    if (unlocked and self.db != null and now - self.last_interaction_time > auto_lock_time_s) {
         self.lock();
     }
 
@@ -340,12 +345,21 @@ pub fn update(self: *Self) void {
     self.delete_confirm.tick(dt);
     self.detail_delete_confirm.tick(dt);
     self.manage_delete_confirm.tick(dt);
-    if (self.copy_feedback_timer > 0) {
-        self.copy_feedback_timer -= rl.getFrameTime();
-        // Clear the clipboard as soon as the toast timer expires.
-        if (self.copy_feedback_timer <= 0) {
-            self.copy_feedback_timer = 0;
-            rl.setClipboardText("");
+
+    // Clipboard toast timer
+    if (self.copy_feedback_timer_s > 0) {
+        self.copy_feedback_timer_s -= rl.getFrameTime();
+    }
+
+    // Clear the clipboard after the timer expires (desktop only — on Android
+    // the Java Handler in Clipboard.java does this independently of the render loop).
+    if (comptime !is_android) {
+        if (self.clip_clear_timeout_s > 0) {
+            self.clip_clear_timeout_s -= rl.getFrameTime();
+            if (self.clip_clear_timeout_s <= 0) {
+                self.clip_clear_timeout_s = 0;
+                ui.doClearClipboard();
+            }
         }
     }
     if (self.browser_toast_timer > 0) {
@@ -960,8 +974,13 @@ fn inputDetail(self: *Self, c: Ctx) void {
                             var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                             const n = @min(vals[fi].len, ui.max_field);
                             @memcpy(cbuf[0..n], vals[fi][0..n]);
-                            rl.setClipboardText(&cbuf);
-                            self.copy_feedback_timer = 1.5;
+                            if (fi == ui.PW_IDX) {
+                                ui.copySensitiveToClipboard(&cbuf);
+                            } else {
+                                ui.copyToClipboard(&cbuf);
+                            }
+                            self.copy_feedback_timer_s = clipboard_toast_duration_s;
+                            self.clip_clear_timeout_s = clipboard_timeout_s;
                             break;
                         }
                     }
@@ -1292,8 +1311,13 @@ fn inputHistory(self: *Self, c: Ctx) void {
                 var cbuf: [ui.max_field + 1:0]u8 = std.mem.zeroes([ui.max_field + 1:0]u8);
                 const n = @min(vals[fi].len, ui.max_field);
                 @memcpy(cbuf[0..n], vals[fi][0..n]);
-                rl.setClipboardText(&cbuf);
-                self.copy_feedback_timer = 1.5;
+                if (fi == ui.PW_IDX) {
+                    ui.copySensitiveToClipboard(&cbuf);
+                } else {
+                    ui.copyToClipboard(&cbuf);
+                }
+                self.copy_feedback_timer_s = clipboard_toast_duration_s;
+                self.clip_clear_timeout_s = clipboard_timeout_s;
                 break;
             }
         }
@@ -2173,7 +2197,7 @@ fn drawDetail(self: *Self, c: Ctx) void {
     ui.drawButton("View History", c.cx() + c.L.pad, hist_btn_y, c.cw() - 2 * c.L.pad, hist_btn_h, .{ .r = 40, .g = 80, .b = 140, .a = 255 });
 
     // "Copied!" toast
-    if (self.copy_feedback_timer > 0) {
+    if (self.copy_feedback_timer_s > 0) {
         const toast = "Copied!";
         const ttw = ui.measureText(toast, c.L.fs_body);
         const toast_pad = c.L.pad * 2;
@@ -2335,7 +2359,7 @@ fn drawHistory(self: *Self, c: Ctx) void {
     drawEntryFields(entry, self.hist_show_pw, scroll_i, bar_y, c);
 
     // "Copied!" toast
-    if (self.copy_feedback_timer > 0) {
+    if (self.copy_feedback_timer_s > 0) {
         const toast = "Copied!";
         const ttw = ui.measureText(toast, c.L.fs_body);
         const toast_pad = c.L.pad * 2;

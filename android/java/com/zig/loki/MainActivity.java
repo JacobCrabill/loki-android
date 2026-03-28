@@ -64,6 +64,14 @@ public class MainActivity extends NativeActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        // Clear any sensitive clipboard data whose timeout elapsed while the
+        // app was backgrounded (including after a process kill/restart).
+        Clipboard.onResumeClearCheck(this);
+    }
+
+    @Override
     protected void onStop() {
         super.onStop();
         if (Build.VERSION.SDK_INT >= 33 && mBackCallback != null) {

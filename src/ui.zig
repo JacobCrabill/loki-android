@@ -11,6 +11,54 @@ pub const is_android = builtin.abi.isAndroid();
 /// Returns 1 if the system back gesture fired since last call, 0 otherwise.
 pub extern fn pollBackPressed() c_int;
 
+// ---- Android clipboard ----
+
+/// Set text to the normal system clipboard
+pub extern fn setClipboardText(text: [*c]const u8) void;
+
+/// Like setClipboardText but marks the data as sensitive (API 33+: EXTRA_IS_SENSITIVE)
+/// and schedules an auto-clear after delay_ms milliseconds via a Handler on the
+/// Android UI thread — fires even while the app is backgrounded.
+pub extern fn setSensitiveClipboardText(text: [*c]const u8, delay_ms: c_long) void;
+
+/// Clear the clipboard via ClipboardManager.clearPrimaryClip() (API 28+).
+/// Also cancels any pending auto-clear scheduled by setSensitiveClipboardText().
+pub extern fn clearClipboard() void;
+
+/// The delay in milliseconds before a sensitive clipboard entry is auto-cleared.
+pub const clipboard_clear_delay_ms: c_long = 30_000; // 30 seconds
+
+/// Platform-aware clipboard write.
+pub fn copyToClipboard(text: [:0]const u8) void {
+    if (comptime is_android) {
+        setClipboardText(text);
+    } else {
+        rl.setClipboardText(text);
+    }
+}
+
+/// Like copyToClipboard but tells the system this is sensitive data (e.g. a
+/// password) so it is not shown in clipboard previews or suggestions.
+/// On Android, also schedules an auto-clear after clipboard_clear_delay_ms.
+/// On desktop falls back to a plain copy (no auto-clear).
+pub fn copySensitiveToClipboard(text: [:0]const u8) void {
+    if (comptime is_android) {
+        setSensitiveClipboardText(text, clipboard_clear_delay_ms);
+    } else {
+        rl.setClipboardText(text);
+    }
+}
+
+/// Clear the clipboard.  On Android uses clearPrimaryClip() (API 28+) which
+/// reliably removes any clip including sensitive ones; on desktop sets "".
+pub fn doClearClipboard() void {
+    if (comptime is_android) {
+        clearClipboard();
+    } else {
+        rl.setClipboardText("");
+    }
+}
+
 // ---- Android text-input dialog ----
 
 pub extern fn showTextInputDialog(title: [*c]const u8, current: [*c]const u8, is_password: c_int) void;
